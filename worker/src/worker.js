@@ -8,20 +8,23 @@
 //   GET  /program/:id/state              -> stored JSON blob (or null)
 //   POST /program/:id/state              -> stores the request body as the JSON blob
 //   GET  /program/:id/leaderboard        -> computed week/wave/program stats per linked athlete
+//   POST /feedback {feedbackText}        -> files product feedback against the logged-in athlete
 //
 // Admin routes (no auth check — protected only by the URL being unlisted, by design):
 //   GET  /admin/athletes                 POST /admin/athletes {username,password,displayName,programIds}
+//   PUT  /admin/athletes/:id              {displayName}
 //   PUT  /admin/athletes/:id/programs     {programIds}
 //   PUT  /admin/athletes/:id/password     {password}
 //   DELETE /admin/athletes/:id
 //   GET  /admin/programs                 POST /admin/programs {name, activityTypeIds}
-//   GET  /admin/programs/:id
+//   GET  /admin/programs/:id             DELETE /admin/programs/:id
 //   POST /admin/programs/:id/phases       {name,startDate,endDate}
 //   PUT  /admin/programs/:id/phases/:phaseId   {name,startDate,endDate}
 //   DELETE /admin/programs/:id/phases/:phaseId
 //   PUT  /admin/programs/:id/activity-types   {activityTypeIds:[...]}  (replaces linked set; never touches program_state)
 //   GET  /admin/activity-types           POST /admin/activity-types {key,label,infoText}
 //   PUT  /admin/activity-types/:key      {label,infoText}
+//   GET  /admin/feedback                 -> all product feedback, newest first, with the author's name
 
 const ALLOWED_ORIGIN = 'https://daviddamjakob-claude.github.io';
 
@@ -101,33 +104,57 @@ function parseHM(v) {
 }
 // "Zone 2 Time" always means time logged specifically under the built-in 'zone2' activity key —
 // independent of the per-workout "include in Run Progress chart" checkbox, which only controls the chart.
+//
+// byDiscipline is keyed by activity type and carries both done and target so the leaderboard's
+// hover tooltips can break a bar down per activity. It only contains types that actually appear in
+// the logged workouts or the stored targets; the frontend fills in any linked-but-unused types.
 function sumWeeks(weeks, stateData) {
   let sessions = 0, target = 0, zone2Minutes = 0;
+  const byDiscipline = {};
+  const zone2Activities = [];
+  const touch = key => (byDiscipline[key] ||= { done: 0, target: 0 });
   weeks.forEach(w => {
     const wk = stateData && stateData.weeks && stateData.weeks[w.id];
     if (!wk) return;
     const workouts = wk.workouts || [];
     sessions += workouts.length;
     workouts.forEach(x => {
+      touch(x.type).done += 1;
       if (x.type === 'zone2') {
         const mins = parseHM(x.values && x.values.time);
         if (!isNaN(mins)) zone2Minutes += mins;
+        zone2Activities.push({ date: (x.values && x.values.date) || null, minutes: isNaN(mins) ? null : Math.round(mins) });
       }
     });
-    if (wk.targets) Object.values(wk.targets).forEach(t => { target += Number(t.planned) || 0; });
+    if (wk.targets) Object.entries(wk.targets).forEach(([key, t]) => {
+      const planned = Number(t.planned) || 0;
+      target += planned;
+      touch(key).target += planned;
+    });
   });
-  return { sessions, target, zone2Minutes: Math.round(zone2Minutes), completionPct: target > 0 ? Math.round(sessions / target * 100) : 0 };
+  zone2Activities.sort((a, b) => ((a.date || '') < (b.date || '') ? -1 : 1));
+  return { sessions, target, zone2Minutes: Math.round(zone2Minutes), completionPct: target > 0 ? Math.round(sessions / target * 100) : 0, byDiscipline, zone2Activities };
 }
+// byWeek / byWave are the per-sub-period breakdowns behind the Current Wave and Full Program
+// tooltips; both are built oldest-first so the frontend can render them in order.
 function computeAthleteStats(weeks, stateData) {
   const todayISO = isoDate(new Date());
   const currentWeek = weeks.find(w => weekStatusOf(w, todayISO) === 'current');
   const nonFutureWeeks = weeks.filter(w => weekStatusOf(w, todayISO) !== 'future');
   const currentWaveName = currentWeek ? currentWeek.phaseName : null;
   const waveWeeks = currentWaveName ? nonFutureWeeks.filter(w => w.phaseName === currentWaveName) : [];
+  const byWeek = waveWeeks.map(w => ({ label: 'Week ' + w.id.slice(1), byDiscipline: sumWeeks([w], stateData).byDiscipline }));
+  const waveOrder = [];
+  const waveGroups = {};
+  nonFutureWeeks.forEach(w => {
+    if (!waveGroups[w.phaseName]) { waveGroups[w.phaseName] = []; waveOrder.push(w.phaseName); }
+    waveGroups[w.phaseName].push(w);
+  });
+  const byWave = waveOrder.map(name => ({ label: name, byDiscipline: sumWeeks(waveGroups[name], stateData).byDiscipline }));
   return {
-    currentWeek: currentWeek ? sumWeeks([currentWeek], stateData) : { sessions: 0, target: 0, zone2Minutes: 0, completionPct: 0 },
-    currentWave: { ...sumWeeks(waveWeeks, stateData), waveName: currentWaveName },
-    program: sumWeeks(nonFutureWeeks, stateData),
+    currentWeek: currentWeek ? sumWeeks([currentWeek], stateData) : { sessions: 0, target: 0, zone2Minutes: 0, completionPct: 0, byDiscipline: {}, zone2Activities: [] },
+    currentWave: { ...sumWeeks(waveWeeks, stateData), waveName: currentWaveName, byWeek },
+    program: { ...sumWeeks(nonFutureWeeks, stateData), byWave },
   };
 }
 
@@ -157,22 +184,31 @@ async function handleMe(request, env, cors) {
   ).bind(athleteId).all();
   return json({ displayName: athlete.display_name, programs: programs.results }, 200, cors);
 }
-async function handleProgramConfig(request, env, cors, programId) {
-  const athleteId = await requireAthlete(request, env);
-  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
-  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
+// The *Data() helpers hold the raw reads, split out from their handlers so the same query can be
+// reused from another route without re-running the athlete auth/authorisation checks that wrap it.
+async function programConfigData(env, programId) {
   const phases = await env.DB.prepare('SELECT id, name, start_date AS startDate, end_date AS endDate FROM phases WHERE program_id = ? ORDER BY sort_order').bind(programId).all();
   const activityTypes = await env.DB.prepare(
     'SELECT a.key, a.label, a.info_text AS infoText FROM activity_types a JOIN program_activity_types pat ON pat.activity_type_id = a.id WHERE pat.program_id = ? ORDER BY pat.sort_order'
   ).bind(programId).all();
-  return json({ phases: phases.results, activityTypes: activityTypes.results }, 200, cors);
+  return { phases: phases.results, activityTypes: activityTypes.results };
+}
+async function handleProgramConfig(request, env, cors, programId) {
+  const athleteId = await requireAthlete(request, env);
+  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
+  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
+  return json(await programConfigData(env, programId), 200, cors);
+}
+async function programStateData(env, athleteId, programId) {
+  const row = await env.DB.prepare('SELECT data FROM program_state WHERE athlete_id = ? AND program_id = ?').bind(athleteId, programId).first();
+  return row ? row.data : 'null';
 }
 async function handleStateGet(request, env, cors, programId) {
   const athleteId = await requireAthlete(request, env);
   if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
   if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
-  const row = await env.DB.prepare('SELECT data FROM program_state WHERE athlete_id = ? AND program_id = ?').bind(athleteId, programId).first();
-  return new Response(row ? row.data : 'null', { headers: { ...cors, 'Content-Type': 'application/json' } });
+  const data = await programStateData(env, athleteId, programId);
+  return new Response(data, { headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 async function handleStatePost(request, env, cors, programId) {
   const athleteId = await requireAthlete(request, env);
@@ -186,30 +222,46 @@ async function handleStatePost(request, env, cors, programId) {
   ).bind(athleteId, programId, body).run();
   return json({ ok: true }, 200, cors);
 }
-async function handleLeaderboard(request, env, cors, programId) {
-  const athleteId = await requireAthlete(request, env);
-  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
-  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
+async function programLeaderboardData(env, programId) {
   const phasesRes = await env.DB.prepare('SELECT name, start_date AS startDate, end_date AS endDate FROM phases WHERE program_id = ? ORDER BY sort_order').bind(programId).all();
   const weeks = deriveWeeksWithIds(phasesRes.results);
   const linked = await env.DB.prepare(
     'SELECT a.id, a.display_name AS displayName FROM athletes a JOIN athlete_programs ap ON ap.athlete_id = a.id WHERE ap.program_id = ? ORDER BY a.id'
   ).bind(programId).all();
-  const athletes = [];
-  for (const a of linked.results) {
+  const athletes = await Promise.all(linked.results.map(async a => {
     const stateRow = await env.DB.prepare('SELECT data FROM program_state WHERE athlete_id = ? AND program_id = ?').bind(a.id, programId).first();
     const stateData = stateRow ? JSON.parse(stateRow.data) : null;
-    athletes.push({ athleteId: a.id, displayName: a.displayName, ...computeAthleteStats(weeks, stateData) });
-  }
-  return json({ athletes }, 200, cors);
+    return { athleteId: a.id, displayName: a.displayName, ...computeAthleteStats(weeks, stateData) };
+  }));
+  return { athletes };
+}
+async function handleLeaderboard(request, env, cors, programId) {
+  const athleteId = await requireAthlete(request, env);
+  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
+  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
+  return json(await programLeaderboardData(env, programId), 200, cors);
+}
+async function handleFeedbackPost(request, env, cors) {
+  const athleteId = await requireAthlete(request, env);
+  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
+  const body = await readJson(request);
+  const feedbackText = body && typeof body.feedbackText === 'string' ? body.feedbackText.trim() : '';
+  if (!feedbackText) return json({ error: 'feedbackText required' }, 400, cors);
+  await env.DB.prepare('INSERT INTO product_feedback (athlete_id, feedback_text) VALUES (?, ?)').bind(athleteId, feedbackText).run();
+  return json({ ok: true }, 200, cors);
 }
 
 // ---------------- admin handlers (no auth, by design) ----------------
+// Independent reads/writes go through Promise.all rather than a sequential await loop — every D1
+// statement is its own network round trip, and serialising them was what made the admin buttons
+// feel slow.
 async function adminListAthletes(env, cors) {
-  const athletes = await env.DB.prepare('SELECT id, username, display_name AS displayName FROM athletes ORDER BY id').all();
-  const links = await env.DB.prepare(
-    'SELECT ap.athlete_id AS athleteId, p.id AS programId, p.name FROM athlete_programs ap JOIN programs p ON p.id = ap.program_id'
-  ).all();
+  const [athletes, links] = await Promise.all([
+    env.DB.prepare('SELECT id, username, display_name AS displayName FROM athletes ORDER BY id').all(),
+    env.DB.prepare(
+      'SELECT ap.athlete_id AS athleteId, p.id AS programId, p.name FROM athlete_programs ap JOIN programs p ON p.id = ap.program_id'
+    ).all(),
+  ]);
   const byAthlete = {};
   for (const l of links.results) (byAthlete[l.athleteId] ||= []).push({ id: l.programId, name: l.name });
   return json(athletes.results.map(a => ({ ...a, programs: byAthlete[a.id] || [] })), 200, cors);
@@ -221,18 +273,18 @@ async function adminCreateAthlete(request, env, cors) {
   const result = await env.DB.prepare('INSERT INTO athletes (username, password_hash, salt, display_name) VALUES (?, ?, ?, ?)')
     .bind(body.username, hash, salt, body.displayName).run();
   const athleteId = result.meta.last_row_id;
-  for (const programId of (body.programIds || [])) {
-    await env.DB.prepare('INSERT INTO athlete_programs (athlete_id, program_id) VALUES (?, ?)').bind(athleteId, programId).run();
-  }
+  await Promise.all((body.programIds || []).map(programId =>
+    env.DB.prepare('INSERT INTO athlete_programs (athlete_id, program_id) VALUES (?, ?)').bind(athleteId, programId).run()
+  ));
   return json({ id: athleteId }, 201, cors);
 }
 async function adminUpdateAthletePrograms(request, env, cors, athleteId) {
   const body = await readJson(request);
   if (!body || !Array.isArray(body.programIds)) return json({ error: 'programIds array required' }, 400, cors);
   await env.DB.prepare('DELETE FROM athlete_programs WHERE athlete_id = ?').bind(athleteId).run();
-  for (const programId of body.programIds) {
-    await env.DB.prepare('INSERT INTO athlete_programs (athlete_id, program_id) VALUES (?, ?)').bind(athleteId, programId).run();
-  }
+  await Promise.all(body.programIds.map(programId =>
+    env.DB.prepare('INSERT INTO athlete_programs (athlete_id, program_id) VALUES (?, ?)').bind(athleteId, programId).run()
+  ));
   return json({ ok: true }, 200, cors);
 }
 async function adminUpdateAthletePassword(request, env, cors, athleteId) {
@@ -244,10 +296,17 @@ async function adminUpdateAthletePassword(request, env, cors, athleteId) {
   await env.DB.prepare('DELETE FROM sessions WHERE athlete_id = ?').bind(athleteId).run();
   return json({ ok: true }, 200, cors);
 }
+async function adminUpdateAthleteProfile(request, env, cors, athleteId) {
+  const body = await readJson(request);
+  if (!body || !body.displayName) return json({ error: 'displayName required' }, 400, cors);
+  await env.DB.prepare('UPDATE athletes SET display_name = ? WHERE id = ?').bind(body.displayName, athleteId).run();
+  return json({ ok: true }, 200, cors);
+}
 async function adminDeleteAthlete(env, cors, athleteId) {
   await env.DB.prepare('DELETE FROM sessions WHERE athlete_id = ?').bind(athleteId).run();
   await env.DB.prepare('DELETE FROM program_state WHERE athlete_id = ?').bind(athleteId).run();
   await env.DB.prepare('DELETE FROM athlete_programs WHERE athlete_id = ?').bind(athleteId).run();
+  await env.DB.prepare('DELETE FROM product_feedback WHERE athlete_id = ?').bind(athleteId).run();
   await env.DB.prepare('DELETE FROM athletes WHERE id = ?').bind(athleteId).run();
   return json({ ok: true }, 200, cors);
 }
@@ -260,10 +319,9 @@ async function adminCreateProgram(request, env, cors) {
   if (!body || !body.name) return json({ error: 'name required' }, 400, cors);
   const result = await env.DB.prepare('INSERT INTO programs (name) VALUES (?)').bind(body.name).run();
   const programId = result.meta.last_row_id;
-  let order = 0;
-  for (const activityTypeId of (body.activityTypeIds || [])) {
-    await env.DB.prepare('INSERT INTO program_activity_types (program_id, activity_type_id, sort_order) VALUES (?, ?, ?)').bind(programId, activityTypeId, order++).run();
-  }
+  await Promise.all((body.activityTypeIds || []).map((activityTypeId, order) =>
+    env.DB.prepare('INSERT INTO program_activity_types (program_id, activity_type_id, sort_order) VALUES (?, ?, ?)').bind(programId, activityTypeId, order).run()
+  ));
   return json({ id: programId }, 201, cors);
 }
 async function adminGetProgram(env, cors, programId) {
@@ -293,20 +351,36 @@ async function adminDeletePhase(env, cors, phaseId) {
   await env.DB.prepare('DELETE FROM phases WHERE id = ?').bind(phaseId).run();
   return json({ ok: true }, 200, cors);
 }
+// Deleting a program takes every athlete's logged state for it with it — the referencing rows go
+// first so the final DELETE never trips a foreign key.
+async function adminDeleteProgram(env, cors, programId) {
+  await env.DB.prepare('DELETE FROM program_state WHERE program_id = ?').bind(programId).run();
+  await env.DB.prepare('DELETE FROM program_activity_types WHERE program_id = ?').bind(programId).run();
+  await env.DB.prepare('DELETE FROM phases WHERE program_id = ?').bind(programId).run();
+  await env.DB.prepare('DELETE FROM athlete_programs WHERE program_id = ?').bind(programId).run();
+  await env.DB.prepare('DELETE FROM programs WHERE id = ?').bind(programId).run();
+  return json({ ok: true }, 200, cors);
+}
 // Only ever touches the program<->activity-type link table — program_state (logged workout data)
 // is never read or written here, so unlinking (and re-linking later) never loses any history.
 async function adminUpdateProgramActivityTypes(request, env, cors, programId) {
   const body = await readJson(request);
   if (!body || !Array.isArray(body.activityTypeIds)) return json({ error: 'activityTypeIds array required' }, 400, cors);
   await env.DB.prepare('DELETE FROM program_activity_types WHERE program_id = ?').bind(programId).run();
-  let order = 0;
-  for (const activityTypeId of body.activityTypeIds) {
-    await env.DB.prepare('INSERT INTO program_activity_types (program_id, activity_type_id, sort_order) VALUES (?, ?, ?)').bind(programId, activityTypeId, order++).run();
-  }
+  await Promise.all(body.activityTypeIds.map((activityTypeId, order) =>
+    env.DB.prepare('INSERT INTO program_activity_types (program_id, activity_type_id, sort_order) VALUES (?, ?, ?)').bind(programId, activityTypeId, order).run()
+  ));
   return json({ ok: true }, 200, cors);
 }
 async function adminListActivityTypes(env, cors) {
   const rows = await env.DB.prepare('SELECT id, key, label, info_text AS infoText FROM activity_types ORDER BY id').all();
+  return json(rows.results, 200, cors);
+}
+async function adminListFeedback(env, cors) {
+  const rows = await env.DB.prepare(
+    'SELECT pf.id, a.display_name AS displayName, a.username, pf.feedback_text AS feedbackText, pf.created_at AS createdAt ' +
+    'FROM product_feedback pf JOIN athletes a ON a.id = pf.athlete_id ORDER BY pf.created_at DESC'
+  ).all();
   return json(rows.results, 200, cors);
 }
 async function adminCreateActivityType(request, env, cors) {
@@ -328,7 +402,6 @@ async function adminUpdateActivityType(request, env, cors, key) {
     .bind(body.label, body.infoText, key).run();
   return json({ ok: true }, 200, cors);
 }
-
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
@@ -349,19 +422,25 @@ export default {
       if (seg[0] === 'program' && seg[2] === 'state' && method === 'POST') return handleStatePost(request, env, cors, seg[1]);
       if (seg[0] === 'program' && seg[2] === 'leaderboard' && method === 'GET') return handleLeaderboard(request, env, cors, seg[1]);
 
+      if (seg[0] === 'feedback' && !seg[1] && method === 'POST') return handleFeedbackPost(request, env, cors);
+
       if (seg[0] === 'admin' && seg[1] === 'athletes' && !seg[2] && method === 'GET') return adminListAthletes(env, cors);
       if (seg[0] === 'admin' && seg[1] === 'athletes' && !seg[2] && method === 'POST') return adminCreateAthlete(request, env, cors);
       if (seg[0] === 'admin' && seg[1] === 'athletes' && seg[3] === 'programs' && method === 'PUT') return adminUpdateAthletePrograms(request, env, cors, seg[2]);
       if (seg[0] === 'admin' && seg[1] === 'athletes' && seg[3] === 'password' && method === 'PUT') return adminUpdateAthletePassword(request, env, cors, seg[2]);
+      if (seg[0] === 'admin' && seg[1] === 'athletes' && seg[2] && !seg[3] && method === 'PUT') return adminUpdateAthleteProfile(request, env, cors, seg[2]);
       if (seg[0] === 'admin' && seg[1] === 'athletes' && seg[2] && !seg[3] && method === 'DELETE') return adminDeleteAthlete(env, cors, seg[2]);
 
       if (seg[0] === 'admin' && seg[1] === 'programs' && !seg[2] && method === 'GET') return adminListPrograms(env, cors);
       if (seg[0] === 'admin' && seg[1] === 'programs' && !seg[2] && method === 'POST') return adminCreateProgram(request, env, cors);
       if (seg[0] === 'admin' && seg[1] === 'programs' && seg[2] && !seg[3] && method === 'GET') return adminGetProgram(env, cors, seg[2]);
+      if (seg[0] === 'admin' && seg[1] === 'programs' && seg[2] && !seg[3] && method === 'DELETE') return adminDeleteProgram(env, cors, seg[2]);
       if (seg[0] === 'admin' && seg[1] === 'programs' && seg[3] === 'phases' && !seg[4] && method === 'POST') return adminCreatePhase(request, env, cors, seg[2]);
       if (seg[0] === 'admin' && seg[1] === 'programs' && seg[3] === 'phases' && seg[4] && method === 'PUT') return adminUpdatePhase(request, env, cors, seg[4]);
       if (seg[0] === 'admin' && seg[1] === 'programs' && seg[3] === 'phases' && seg[4] && method === 'DELETE') return adminDeletePhase(env, cors, seg[4]);
       if (seg[0] === 'admin' && seg[1] === 'programs' && seg[3] === 'activity-types' && !seg[4] && method === 'PUT') return adminUpdateProgramActivityTypes(request, env, cors, seg[2]);
+
+      if (seg[0] === 'admin' && seg[1] === 'feedback' && method === 'GET') return adminListFeedback(env, cors);
 
       if (seg[0] === 'admin' && seg[1] === 'activity-types' && !seg[2] && method === 'GET') return adminListActivityTypes(env, cors);
       if (seg[0] === 'admin' && seg[1] === 'activity-types' && !seg[2] && method === 'POST') return adminCreateActivityType(request, env, cors);
