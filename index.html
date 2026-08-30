@@ -268,7 +268,15 @@ body.pre-login .topbar, body.pre-login .panel{display:none}
 /* A single reading column rather than the Training Log's wide board — the feed is read top to
    bottom, and full-width cards on a desktop monitor put the author and the metrics comically
    far apart. */
-.feed-wrap{max-width:620px; margin:0 auto; display:flex; flex-direction:column; gap:34px}
+.feed-wrap{max-width:620px; margin:0 auto}
+.feed-list{display:flex; flex-direction:column; gap:34px}
+.feed-controls{display:flex; gap:20px; align-items:flex-end; flex-wrap:wrap; margin-bottom:26px; padding-bottom:18px; border-bottom:0.5px solid var(--cardborder)}
+.feed-controls label{font-size:9.5px; letter-spacing:0.1em; text-transform:uppercase; color:var(--muted); display:flex; flex-direction:column; gap:5px}
+.feed-controls select{font-family:"Space Grotesk"; font-size:12px; color:var(--ink); background:#fff; border:0.5px solid var(--cardborder); border-radius:5px; padding:6px 9px; text-transform:none; letter-spacing:0; min-width:158px; outline:none}
+.feed-controls select:focus{border-color:var(--accent)}
+.feed-clear{background:none; border:none; cursor:pointer; font-family:"Space Grotesk"; font-weight:500; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--accent); padding:0 0 8px}
+.feed-clear:hover{text-decoration:underline}
+.feed-count{margin-left:auto; padding-bottom:8px; font-size:10px; letter-spacing:0.08em; text-transform:uppercase; color:var(--muted2); font-variant-numeric:tabular-nums}
 .feed-week-head{display:flex; align-items:baseline; gap:12px; margin-bottom:14px; flex-wrap:wrap}
 .feed-week-title{font-family:"Syne"; font-weight:800; font-size:20px; text-transform:uppercase; letter-spacing:-0.01em; color:var(--accent)}
 .feed-week-meta{font-size:11px; letter-spacing:0.08em; color:var(--muted)}
@@ -358,6 +366,10 @@ body.pre-login .topbar, body.pre-login .panel{display:none}
      than ship a broken one. selectTab() also moves off it if the viewport shrinks. */
   .tab[data-tab="sim"]{display:none}
   #panel-feed{padding:22px 20px 60px}
+  .feed-controls{gap:14px}
+  .feed-controls label{flex:1 1 100%}
+  .feed-controls select{width:100%; min-width:0}
+  .feed-count{margin-left:0; padding-bottom:0}
   .plan-title,.plan-target{max-width:none}
   .brandrow{position:relative; padding-top:20px}
   .headmeta{display:none}
@@ -449,7 +461,7 @@ body.pre-login .topbar, body.pre-login .panel{display:none}
     <input class="plan-target" id="planTargetMobile" value="">
   </div><div class="week-picker" id="weekPicker"></div><div class="board" id="board"></div></section>
 
-<section class="panel" id="panel-feed"><div class="feed-wrap" id="feed"></div></section>
+<section class="panel" id="panel-feed"><div class="feed-wrap"><div class="feed-controls" id="feedControls"></div><div class="feed-list" id="feed"></div></div></section>
 
 <section class="panel" id="panel-analytics"><div id="analytics"></div></section>
 
@@ -671,7 +683,7 @@ function migrate(s){
   return base;
 }
 function loadLocal(){ try{ const raw=localStorage.getItem(storeKey()); return raw? migrate(JSON.parse(raw)) : null; }catch(e){ return null; } }
-function resetFeedState(){ feedData=null; feedOpenComments={}; }
+function resetFeedState(){ feedData=null; feedOpenComments={}; feedWeekFilter='all'; feedAthleteFilter='all'; }
 let state = null;
 
 let saveTimer;
@@ -1170,6 +1182,8 @@ function renderLeaderboardHtml(athletesStats){
 // time the tab is opened — other athletes post while the page is sitting there.
 let feedData = null;
 let feedOpenComments = {}; // itemKey -> bool, so a re-render leaves open threads open
+let feedWeekFilter = 'all';    // a week id ('w7') or 'all'
+let feedAthleteFilter = 'all'; // an athlete id or 'all'
 
 async function loadFeed(){
   const host=document.getElementById('feed');
@@ -1190,22 +1204,54 @@ function feedByDateDesc(a,b){
   if(!db) return -1;
   return da<db?1:-1;
 }
+// Both filters narrow what is already loaded rather than re-fetching — the whole program's feed
+// is one payload, so switching athlete or week is instant.
+function feedFilteredItems(){
+  return (feedData.items||[]).filter(it=>
+    (feedWeekFilter==='all' || it.weekId===feedWeekFilter) &&
+    (feedAthleteFilter==='all' || String(it.athleteId)===String(feedAthleteFilter)));
+}
+function renderFeedControls(total,shown){
+  const host=document.getElementById('feedControls');
+  if(!host) return;
+  if(!feedData){ host.innerHTML=''; return; }
+  // The week list is built from every item, not the filtered set, so the options stay put while
+  // you switch athlete — otherwise the week you picked would vanish from under you.
+  const weeksWithItems=new Set((feedData.items||[]).map(i=>i.weekId));
+  const weekOpts=WEEKS.slice().reverse().filter(w=>weeksWithItems.has(w.id)).map(w=>
+    `<option value="${w.id}"${feedWeekFilter===w.id?' selected':''}>Week ${w.num} · ${w.range[0]} – ${w.range[1]}</option>`).join('');
+  const athleteOpts=(feedData.athletes||[]).map(a=>
+    `<option value="${a.id}"${String(feedAthleteFilter)===String(a.id)?' selected':''}>${escapeHtml(a.displayName)}</option>`).join('');
+  const filtering=feedWeekFilter!=='all'||feedAthleteFilter!=='all';
+  host.innerHTML=`
+    <label>Week<select data-feed-week><option value="all"${feedWeekFilter==='all'?' selected':''}>All weeks</option>${weekOpts}</select></label>
+    <label>Athlete<select data-feed-athlete><option value="all"${feedAthleteFilter==='all'?' selected':''}>Everyone</option>${athleteOpts}</select></label>
+    ${filtering?'<button class="feed-clear" data-feed-clear>Clear filters</button>':''}
+    <span class="feed-count">${filtering?`${shown} of ${total}`:`${total}`} card${total===1?'':'s'}</span>`;
+  host.querySelector('[data-feed-week]').addEventListener('change',e=>{ feedWeekFilter=e.target.value; renderFeed(); });
+  host.querySelector('[data-feed-athlete]').addEventListener('change',e=>{ feedAthleteFilter=e.target.value; renderFeed(); });
+  const clear=host.querySelector('[data-feed-clear]');
+  if(clear) clear.addEventListener('click',()=>{ feedWeekFilter='all'; feedAthleteFilter='all'; renderFeed(); });
+}
 function renderFeed(){
   const host=document.getElementById('feed');
   if(!host) return;
-  if(!feedData){ host.innerHTML='<div class="feed-empty">Could not load the feed.</div>'; return; }
+  if(!feedData){ renderFeedControls(0,0); host.innerHTML='<div class="feed-empty">Could not load the feed.</div>'; return; }
+  const items=feedFilteredItems();
+  renderFeedControls((feedData.items||[]).length, items.length);
   const byWeek={};
-  (feedData.items||[]).forEach(it=>{ (byWeek[it.weekId] ||= []).push(it); });
+  items.forEach(it=>{ (byWeek[it.weekId] ||= []).push(it); });
   const sections=WEEKS.slice().reverse().filter(w=>(byWeek[w.id]||[]).length).map(w=>{
-    const items=byWeek[w.id];
-    const wraps=items.filter(i=>i.kind==='wrapup').sort((a,b)=>a.displayName.localeCompare(b.displayName));
-    const workouts=items.filter(i=>i.kind==='workout').sort(feedByDateDesc);
+    const weekItems=byWeek[w.id];
+    const wraps=weekItems.filter(i=>i.kind==='wrapup').sort((a,b)=>a.displayName.localeCompare(b.displayName));
+    const workouts=weekItems.filter(i=>i.kind==='workout').sort(feedByDateDesc);
     return `<section class="feed-week">
       <div class="feed-week-head"><span class="phase-rule"></span><span class="feed-week-title">Week ${w.num}</span><span class="feed-week-meta">${w.range[0]} – ${w.range[1]} · ${escapeHtml(w.phase)}</span></div>
       <div class="feed-items">${wraps.concat(workouts).map(feedCardHtml).join('')}</div>
     </section>`;
   }).join('');
-  host.innerHTML=sections||'<div class="feed-empty">Nothing logged on this program yet.</div>';
+  const filtering=feedWeekFilter!=='all'||feedAthleteFilter!=='all';
+  host.innerHTML=sections||`<div class="feed-empty">${filtering?'No cards match these filters.':'Nothing logged on this program yet.'}</div>`;
   wireFeedCards();
 }
 function feedInitial(name){ return (String(name||'?').trim().charAt(0)||'?').toUpperCase(); }

@@ -354,7 +354,9 @@ async function programFeedData(env, programId, viewerAthleteId) {
     it.comments = cmByKey[it.key] || [];
   });
 
-  return { viewerAthleteId, weeks, items };
+  // The roster is returned in full, not derived from items, so the Feed's athlete filter can
+  // still offer someone who has logged nothing yet.
+  return { viewerAthleteId, weeks, athletes: linked.results, items };
 }
 async function handleFeed(request, env, cors, programId) {
   const athleteId = await requireAthlete(request, env);
