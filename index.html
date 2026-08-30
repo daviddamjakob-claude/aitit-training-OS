@@ -263,6 +263,51 @@ body.pre-login .topbar, body.pre-login .panel{display:none}
 .rp-tooltip{display:none; position:absolute; background:#fff; border:0.5px solid var(--cardborder); border-radius:6px; padding:9px 11px; font-size:11px; line-height:1.6; color:var(--mid); box-shadow:0 8px 24px rgba(12,21,18,.16); z-index:30; pointer-events:none; white-space:normal; max-width:200px}
 .rp-tooltip.show{display:block}
 
+/* ---------- FEED ---------- */
+#panel-feed{padding:28px 32px 60px}
+/* A single reading column rather than the Training Log's wide board — the feed is read top to
+   bottom, and full-width cards on a desktop monitor put the author and the metrics comically
+   far apart. */
+.feed-wrap{max-width:620px; margin:0 auto; display:flex; flex-direction:column; gap:34px}
+.feed-week-head{display:flex; align-items:baseline; gap:12px; margin-bottom:14px; flex-wrap:wrap}
+.feed-week-title{font-family:"Syne"; font-weight:800; font-size:20px; text-transform:uppercase; letter-spacing:-0.01em; color:var(--accent)}
+.feed-week-meta{font-size:11px; letter-spacing:0.08em; color:var(--muted)}
+.feed-items{display:flex; flex-direction:column; gap:14px}
+.feed-card{background:#fff; border:0.5px solid var(--cardborder); border-left:2px solid var(--accent); border-radius:8px; padding:16px 18px; box-shadow:var(--shadow)}
+.feed-card.wrapup{border-left-color:var(--heromid); background:var(--s2)}
+.feed-who{display:flex; align-items:center; gap:9px; margin-bottom:12px}
+.feed-avatar{width:28px; height:28px; border-radius:50%; background:var(--accent); color:#fff; font-family:"Syne"; font-weight:700; font-size:12px; display:flex; align-items:center; justify-content:center; flex:0 0 auto}
+.feed-card.wrapup .feed-avatar{background:var(--heromid)}
+.feed-name{font-family:"Syne"; font-weight:700; font-size:14px; color:var(--ink); letter-spacing:-0.01em}
+.feed-meta{margin-left:auto; text-align:right; font-size:9.5px; letter-spacing:0.12em; text-transform:uppercase; color:var(--muted)}
+.feed-card .wphotos{margin-bottom:0}
+.feed-card .wdetails:last-child,.feed-card .breakdown:last-child{margin-bottom:0}
+.wrapup-z2{font-size:11px; color:var(--muted); letter-spacing:0.03em}
+.wrapup-z2 b{color:var(--mid); font-weight:600; font-variant-numeric:tabular-nums}
+.feed-empty{font-size:12px; color:var(--muted2); font-style:italic; text-align:center; padding:44px 0}
+
+.feed-social{display:flex; align-items:center; gap:16px; margin-top:13px; padding-top:12px; border-top:0.5px solid var(--cardborder)}
+.hi5{display:flex; align-items:center; gap:6px; background:#fff; border:0.5px solid var(--cardborder); border-radius:20px; padding:5px 12px; cursor:pointer; font-family:"Space Grotesk"; font-weight:500; font-size:11px; letter-spacing:0.04em; color:var(--muted); transition:.15s}
+.hi5:hover{border-color:var(--accent); color:var(--accent)}
+.hi5.on{background:var(--mint); border-color:var(--accent); color:var(--accentdark); font-weight:600}
+.hi5:disabled{opacity:.5; cursor:default}
+.hi5 .n{font-variant-numeric:tabular-nums}
+.feed-comment-toggle{background:none; border:none; cursor:pointer; font-family:"Space Grotesk"; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--muted); padding:0; transition:.15s}
+.feed-comment-toggle:hover{color:var(--accent)}
+.feed-comments{display:none; flex-direction:column; gap:11px; margin-top:13px}
+.feed-comments.show{display:flex}
+.fcomment .fc-head{display:flex; align-items:baseline; gap:8px; margin-bottom:2px}
+.fcomment .fc-who{font-weight:600; color:var(--ink); font-size:11px}
+.fcomment .fc-when{font-size:9.5px; letter-spacing:0.06em; color:var(--muted2)}
+.fcomment .fc-del{margin-left:auto; background:none; border:none; cursor:pointer; font-family:"Space Grotesk"; font-size:9px; letter-spacing:0.1em; text-transform:uppercase; color:var(--muted2); padding:0}
+.fcomment .fc-del:hover{color:#c0392b}
+.fcomment .fc-body{font-size:11.5px; line-height:1.55; color:var(--mid); white-space:pre-wrap}
+.feed-comment-form{display:flex; gap:8px; align-items:flex-start}
+.feed-comment-form textarea{flex:1 1 auto; background:var(--bg); border:0.5px solid var(--cardborder); color:var(--mid); font-family:"Space Grotesk"; font-size:11.5px; line-height:1.5; padding:7px 9px; border-radius:5px; resize:vertical; min-height:34px; outline:none}
+.feed-comment-form textarea:focus{border-color:var(--accent)}
+.feed-comment-form textarea::placeholder{color:var(--muted2)}
+.feed-comment-form .btn{padding:7px 12px; font-size:11px}
+
 /* ---------- SIMULATIONS ---------- */
 .sim-empty{max-width:440px; text-align:center; padding:40px}
 .sim-empty .tag{display:inline-block; font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--accent); border:0.5px solid var(--accent); border-radius:20px; padding:4px 12px; margin-bottom:20px}
@@ -303,12 +348,16 @@ body.pre-login .topbar, body.pre-login .panel{display:none}
   body{overflow:visible; height:auto}
   .controls,.tabs,.add-btn{display:none}
   .panel{overflow:visible; display:block !important}
-  #panel-analytics,#panel-sim{display:none !important}
+  #panel-analytics,#panel-feed,#panel-sim{display:none !important}
   .board{flex-wrap:wrap}
 }
 
 .mobile-headmeta{display:none}
 @media (max-width:700px){
+  /* Simulations is a wide, chart-led view that has no mobile design — hide the tab rather
+     than ship a broken one. selectTab() also moves off it if the viewport shrinks. */
+  .tab[data-tab="sim"]{display:none}
+  #panel-feed{padding:22px 20px 60px}
   .plan-title,.plan-target{max-width:none}
   .brandrow{position:relative; padding-top:20px}
   .headmeta{display:none}
@@ -389,6 +438,7 @@ body.pre-login .topbar, body.pre-login .panel{display:none}
   </div>
   <nav class="tabs">
     <button class="tab active" data-tab="log">Training Log</button>
+    <button class="tab" data-tab="feed">Feed</button>
     <button class="tab" data-tab="analytics">Analytics</button>
     <button class="tab" data-tab="sim">Simulations</button>
   </nav>
@@ -398,6 +448,8 @@ body.pre-login .topbar, body.pre-login .panel{display:none}
     <input class="plan-title" id="planTitleMobile" value="">
     <input class="plan-target" id="planTargetMobile" value="">
   </div><div class="week-picker" id="weekPicker"></div><div class="board" id="board"></div></section>
+
+<section class="panel" id="panel-feed"><div class="feed-wrap" id="feed"></div></section>
 
 <section class="panel" id="panel-analytics"><div id="analytics"></div></section>
 
@@ -619,6 +671,7 @@ function migrate(s){
   return base;
 }
 function loadLocal(){ try{ const raw=localStorage.getItem(storeKey()); return raw? migrate(JSON.parse(raw)) : null; }catch(e){ return null; } }
+function resetFeedState(){ feedData=null; feedOpenComments={}; }
 let state = null;
 
 let saveTimer;
@@ -652,6 +705,7 @@ async function pullRemote(){
   titleInputMobile.value=state.title; targetInputMobile.value=state.target;
     buildBoard();
     loadLeaderboard(); // prefetch so opening the Analytics tab is instant; not re-fetched on tab switch
+    if(document.getElementById('panel-feed').classList.contains('active')) loadFeed();
     if(document.getElementById('panel-analytics').classList.contains('active')) renderAnalytics();
     flagSaved('synced');
   }catch(e){ flagSaved('offline'); }
@@ -703,6 +757,7 @@ function applyMobileFilter(){
     if(mobile&&active) ch.scrollIntoView({behavior:'auto',inline:'center',block:'nearest'});
   });
   board.querySelectorAll('.col').forEach(col=>{ col.style.display=(!mobile||col.dataset.week===mobileSelectedWeek)?'':'none'; });
+  enforceMobileTabs();
   board.querySelectorAll('.phase').forEach(ph=>{
     const hasVisible=!mobile||[...ph.querySelectorAll('.col')].some(c=>c.dataset.week===mobileSelectedWeek);
     ph.style.display=hasVisible?'':'none';
@@ -818,7 +873,13 @@ function renderPhotoStrip(stripEl,wid,id){
   const wo=findWorkout(wid,id); if(!wo)return;
   const photos=wo.photos||[];
   stripEl.innerHTML=photos.map((p,i)=>`<div class="wphoto"><img src="${p.secure_url}" loading="lazy" data-photo-idx="${i}"></div>`).join('');
-  stripEl.querySelectorAll('img').forEach(img=> img.addEventListener('click',()=> openLightbox(wid,id,Number(img.dataset.photoIdx))));
+  // photos is wo.photos by reference, so the splice below is also the array the lightbox is
+  // paging through — no second copy to keep in sync.
+  stripEl.querySelectorAll('img').forEach(img=> img.addEventListener('click',()=> openLightbox(photos,Number(img.dataset.photoIdx),{onDelete:idx=>{
+    wo.photos.splice(idx,1);
+    save(); renderWorkouts(wid);
+    if(wo.photos.length) showLightbox(); else closeLightbox();
+  }})));
 }
 
 let photoUploadTarget=null;
@@ -856,12 +917,19 @@ function uploadPhotoFile(file){
 }
 
 /* ---------------- LIGHTBOX ---------------- */
+// Takes the photo array itself rather than a (week, workout) pair, because the Feed shows other
+// athletes' photos, which are never in this athlete's own state. Delete is opt-in via onDelete —
+// the Feed passes none, so its lightbox has no delete button at all.
 const lightbox=document.getElementById('lightbox'), lbImg=document.getElementById('lbImg'), lbCount=document.getElementById('lbCount');
-let lbState={wid:null,id:null,idx:0};
-function openLightbox(wid,id,idx){ lbState={wid,id,idx}; showLightbox(); lightbox.classList.add('show'); }
+let lbState={photos:[],idx:0,onDelete:null};
+function openLightbox(photos,idx,opts){
+  lbState={photos:photos||[], idx:idx||0, onDelete:(opts&&opts.onDelete)||null};
+  document.getElementById('lbDelete').style.display=lbState.onDelete?'':'none';
+  showLightbox(); lightbox.classList.add('show');
+}
 function closeLightbox(){ lightbox.classList.remove('show'); }
 function showLightbox(){
-  const wo=findWorkout(lbState.wid,lbState.id); const photos=(wo&&wo.photos)||[];
+  const photos=lbState.photos||[];
   if(!photos.length){ closeLightbox(); return; }
   lbState.idx=(lbState.idx+photos.length)%photos.length;
   lbImg.src=photos[lbState.idx].secure_url;
@@ -871,11 +939,9 @@ document.getElementById('lbPrev').addEventListener('click',()=>{ lbState.idx--; 
 document.getElementById('lbNext').addEventListener('click',()=>{ lbState.idx++; showLightbox(); });
 document.getElementById('lbClose').addEventListener('click',closeLightbox);
 document.getElementById('lbDelete').addEventListener('click',()=>{
-  const wo=findWorkout(lbState.wid,lbState.id); if(!wo||!wo.photos)return;
+  if(!lbState.onDelete)return;
   if(!confirm('Delete this photo?'))return;
-  wo.photos.splice(lbState.idx,1);
-  save(); renderWorkouts(lbState.wid);
-  if(wo.photos.length) showLightbox(); else closeLightbox();
+  lbState.onDelete(lbState.idx);
 });
 lightbox.addEventListener('click',e=>{ if(e.target===lightbox)closeLightbox(); });
 document.addEventListener('keydown',e=>{
@@ -1098,6 +1164,177 @@ function renderLeaderboardHtml(athletesStats){
   `;
 }
 
+/* ---------------- FEED ---------------- */
+// The shared, program-wide timeline: everyone's logged workouts plus the weekly wrap-ups, laid
+// out on the same week grid as the Training Log. Unlike the leaderboard this is re-fetched every
+// time the tab is opened — other athletes post while the page is sitting there.
+let feedData = null;
+let feedOpenComments = {}; // itemKey -> bool, so a re-render leaves open threads open
+
+async function loadFeed(){
+  const host=document.getElementById('feed');
+  if(host && !feedData) host.innerHTML='<div class="feed-empty">Loading…</div>';
+  try{
+    const res=await apiFetch(`/program/${activeProgramId}/feed`);
+    if(!res.ok) throw new Error('feed fetch failed');
+    feedData=await res.json();
+  }catch(e){ feedData=null; }
+  renderFeed();
+}
+// Newest first, at both levels: weeks run in reverse, and within a week the workouts run by
+// logged training date descending. Wrap-ups sit above the workouts of the week they summarise.
+function feedByDateDesc(a,b){
+  const da=a.date||'', db=b.date||'';
+  if(da===db) return 0;
+  if(!da) return 1;
+  if(!db) return -1;
+  return da<db?1:-1;
+}
+function renderFeed(){
+  const host=document.getElementById('feed');
+  if(!host) return;
+  if(!feedData){ host.innerHTML='<div class="feed-empty">Could not load the feed.</div>'; return; }
+  const byWeek={};
+  (feedData.items||[]).forEach(it=>{ (byWeek[it.weekId] ||= []).push(it); });
+  const sections=WEEKS.slice().reverse().filter(w=>(byWeek[w.id]||[]).length).map(w=>{
+    const items=byWeek[w.id];
+    const wraps=items.filter(i=>i.kind==='wrapup').sort((a,b)=>a.displayName.localeCompare(b.displayName));
+    const workouts=items.filter(i=>i.kind==='workout').sort(feedByDateDesc);
+    return `<section class="feed-week">
+      <div class="feed-week-head"><span class="phase-rule"></span><span class="feed-week-title">Week ${w.num}</span><span class="feed-week-meta">${w.range[0]} – ${w.range[1]} · ${escapeHtml(w.phase)}</span></div>
+      <div class="feed-items">${wraps.concat(workouts).map(feedCardHtml).join('')}</div>
+    </section>`;
+  }).join('');
+  host.innerHTML=sections||'<div class="feed-empty">Nothing logged on this program yet.</div>';
+  wireFeedCards();
+}
+function feedInitial(name){ return (String(name||'?').trim().charAt(0)||'?').toUpperCase(); }
+function fmtFeedTime(s){ // SQLite datetime('now') is UTC; render in the viewer's local time
+  const d=new Date(String(s).replace(' ','T')+'Z');
+  if(isNaN(d)) return s;
+  return d.toLocaleDateString('en-GB',{day:'numeric',month:'short'})+', '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+}
+function feedCardHtml(it){
+  const meta=it.kind==='wrapup' ? 'Week wrap-up'
+    : `${escapeHtml(ACT_MAP[it.type]||it.type)} · ${it.date?fmtDate(it.date):'—'}`;
+  const body=it.kind==='wrapup' ? wrapupBodyHtml(it) : feedWorkoutBodyHtml(it);
+  return `<article class="feed-card${it.kind==='wrapup'?' wrapup':''}" data-key="${escapeHtml(it.key)}">
+    <div class="feed-who">
+      <span class="feed-avatar">${escapeHtml(feedInitial(it.displayName))}</span>
+      <span class="feed-name">${escapeHtml(it.displayName)}</span>
+      <span class="feed-meta">${meta}</span>
+    </div>
+    ${body}
+    ${feedSocialHtml(it)}
+  </article>`;
+}
+// Same metric set and same markup as the Training Log's workout card, minus the action buttons —
+// the Feed is read-only for everyone, including the athlete who logged the session.
+function feedWorkoutBodyHtml(it){
+  const values=it.values||{};
+  const mk=(CARD_METRICS[it.type]||[]).filter(k=>values[k]!==undefined&&values[k]!=='')
+    .map(k=>`<div class="wmetric"><span class="k">${METRIC_LABEL[k]||k}</span><span class="v">${escapeHtml(String(values[k]))}</span></div>`).join('');
+  const rv=it.review?`<span class="wreview ${it.review}">${REVIEW_LABEL[it.review]||it.review}</span>`:'';
+  const dets=it.details?`<div class="wdetails">${escapeHtml(it.details)}</div>`:'';
+  const photos=(it.photos||[]).map((p,i)=>`<div class="wphoto"><img src="${escapeHtml(p.secure_url)}" loading="lazy" data-feed-photo="${i}"></div>`).join('');
+  return `${mk?`<div class="wmetrics">${mk}</div>`:''}${rv}${dets}${photos?`<div class="wphotos">${photos}</div>`:''}`;
+}
+// Rendered from the stored snapshot, not recomputed — a wrap-up is what the week looked like when
+// it closed. ACTIVITIES drives the row order so it matches the Training Log's breakdown, and a
+// type the athlete never touched still shows as 0/n rather than vanishing.
+function wrapupBodyHtml(it){
+  const s=it.summary||{};
+  const rows=ACTIVITIES.map(a=>{
+    const d=(s.byDiscipline&&s.byDiscipline[a.key])||{done:0,target:0};
+    const hit=d.target>0&&d.done>=d.target;
+    return `<div class="brow${hit?' hit':''}"><span>${escapeHtml(ACT_SHORT[a.key]||a.label)}</span><span>${d.done}/${d.target}</span></div>`;
+  }).join('');
+  const z2=s.zone2Minutes?`<div class="wrapup-z2">Zone 2 time <b>${fmtMinutes(s.zone2Minutes)}</b></div>`:'';
+  return `<div class="sum-top"><span class="sum-big">${s.sessions||0}/${s.target||0}</span><span class="sum-lab">sessions</span></div>
+    <div class="bar"><i style="width:${Math.min(s.completionPct||0,100)}%"></i></div>
+    <div class="pct">${s.target>0?`${s.completionPct}% of target`:'no target set'}</div>
+    <div class="breakdown">${rows}</div>${z2}`;
+}
+function feedSocialHtml(it){
+  const hf=it.highFives||{count:0,mine:false};
+  const cs=it.comments||[];
+  const mine=String(feedData.viewerAthleteId);
+  const comments=cs.map(c=>`<div class="fcomment">
+      <div class="fc-head"><span class="fc-who">${escapeHtml(c.authorName)}</span><span class="fc-when">${fmtFeedTime(c.createdAt)}</span>${String(c.authorId)===mine?`<button class="fc-del" data-del-comment="${c.id}">delete</button>`:''}</div>
+      <div class="fc-body">${escapeHtml(c.body)}</div>
+    </div>`).join('');
+  return `<div class="feed-social">
+      <button class="hi5${hf.mine?' on':''}" data-hi5>🙌 high five <span class="n">${hf.count}</span></button>
+      <button class="feed-comment-toggle" data-comment-toggle>${cs.length?`${cs.length} comment${cs.length===1?'':'s'}`:'comment'}</button>
+    </div>
+    <div class="feed-comments${feedOpenComments[it.key]?' show':''}" data-comments>
+      ${comments}
+      <div class="feed-comment-form">
+        <textarea rows="1" placeholder="Say something…" data-comment-input></textarea>
+        <button class="btn mint" data-comment-send>Post</button>
+      </div>
+    </div>`;
+}
+function wireFeedCards(){
+  const host=document.getElementById('feed');
+  host.querySelectorAll('.feed-card').forEach(card=>{
+    const item=(feedData.items||[]).find(i=>i.key===card.dataset.key);
+    if(!item) return;
+    card.querySelectorAll('[data-feed-photo]').forEach(img=>
+      img.addEventListener('click',()=> openLightbox(item.photos,Number(img.dataset.feedPhoto))));
+    const hi5=card.querySelector('[data-hi5]');
+    hi5.addEventListener('click',()=> toggleHighFive(item,hi5));
+    const thread=card.querySelector('[data-comments]');
+    card.querySelector('[data-comment-toggle]').addEventListener('click',()=>{
+      const show=!thread.classList.contains('show');
+      thread.classList.toggle('show',show);
+      feedOpenComments[item.key]=show;
+      if(show) thread.querySelector('[data-comment-input]').focus();
+    });
+    const input=card.querySelector('[data-comment-input]');
+    card.querySelector('[data-comment-send]').addEventListener('click',()=> postFeedComment(item,input));
+    input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)) postFeedComment(item,input); });
+    card.querySelectorAll('[data-del-comment]').forEach(btn=>
+      btn.addEventListener('click',()=> deleteFeedComment(item,btn.dataset.delComment)));
+  });
+}
+// Only the one button is repainted rather than the whole feed — re-rendering would collapse every
+// open comment thread and jump the scroll position on what is otherwise a one-character change.
+async function toggleHighFive(item,btn){
+  btn.disabled=true;
+  try{
+    const res=await apiFetch(`/program/${activeProgramId}/feed/high-five`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({itemKey:item.key})});
+    if(!res.ok) throw new Error('high five failed');
+    const r=await res.json();
+    item.highFives={count:r.count, mine:r.mine};
+    btn.classList.toggle('on',r.mine);
+    btn.querySelector('.n').textContent=r.count;
+  }catch(e){ flagSaved('high five failed'); }
+  btn.disabled=false;
+}
+async function postFeedComment(item,input){
+  const text=input.value.trim();
+  if(!text) return;
+  input.disabled=true;
+  try{
+    const res=await apiFetch(`/program/${activeProgramId}/feed/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({itemKey:item.key, body:text})});
+    if(!res.ok) throw new Error('comment failed');
+    item.comments=(item.comments||[]).concat(await res.json());
+    input.value='';
+    feedOpenComments[item.key]=true;
+    renderFeed();
+  }catch(e){ flagSaved('comment failed'); input.disabled=false; }
+}
+async function deleteFeedComment(item,commentId){
+  if(!confirm('Delete this comment?')) return;
+  try{
+    const res=await apiFetch(`/program/${activeProgramId}/feed/comments/${commentId}`,{method:'DELETE'});
+    if(!res.ok) throw new Error('delete failed');
+    item.comments=(item.comments||[]).filter(c=>String(c.id)!==String(commentId));
+    renderFeed();
+  }catch(e){ flagSaved('delete failed'); }
+}
+
 /* ---------------- ZONE 2 RUN PROGRESS ---------------- */
 const RUN_PROGRESS_METRICS = {
   time:      {label:'Duration',    field:'time',      parse:parseHM, unit:'min'},
@@ -1290,14 +1527,20 @@ function buildActivityTooltip(a){
 }
 
 /* ---------------- TABS ---------------- */
-document.querySelectorAll('.tab').forEach(tab=> tab.addEventListener('click',()=>{
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
-  tab.classList.add('active');
-  const id=tab.dataset.tab;
-  document.getElementById('panel-'+id).classList.add('active');
+function selectTab(id){
+  document.querySelectorAll('.tab').forEach(t=> t.classList.toggle('active', t.dataset.tab===id));
+  document.querySelectorAll('.panel').forEach(p=> p.classList.toggle('active', p.id==='panel-'+id));
   if(id==='analytics') renderAnalytics();
-}));
+  if(id==='feed') loadFeed();
+}
+document.querySelectorAll('.tab').forEach(tab=> tab.addEventListener('click',()=> selectTab(tab.dataset.tab)));
+// The Simulations tab is hidden below 700px. If the viewport crosses that line while it is the
+// active tab, its panel would be the only one showing with no way back to it — fall back to the log.
+function enforceMobileTabs(){
+  if(!window.matchMedia('(max-width:700px)').matches) return;
+  const sim=document.querySelector('.tab[data-tab="sim"]');
+  if(sim && sim.classList.contains('active')) selectTab('log');
+}
 
 /* ---------------- CONTROLS (desktop header + mobile in-panel inputs, kept in sync) ---------------- */
 const titleInput=document.getElementById('planTitle'), targetInput=document.getElementById('planTarget');
@@ -1389,6 +1632,7 @@ function showNoProgramsState(){
 
 async function loadProgram(programId){
   activeProgramId = String(programId);
+  resetFeedState();
   try{ localStorage.setItem(ACTIVE_PROGRAM_KEY, activeProgramId); }catch(e){}
   const cfgRes = await apiFetch(`/program/${activeProgramId}/config`);
   const cfg = await cfgRes.json();

@@ -9,6 +9,11 @@
 //   POST /program/:id/state              -> stores the request body as the JSON blob
 //   GET  /program/:id/leaderboard        -> computed week/wave/program stats per linked athlete
 //   POST /feedback {feedbackText}        -> files product feedback against the logged-in athlete
+//   GET  /program/:id/feed               -> every linked athlete's workouts + week wrap-ups,
+//                                          each with its high-five count and comment thread
+//   POST /program/:id/feed/high-five      {itemKey}       -> toggles the viewer's high five
+//   POST /program/:id/feed/comments       {itemKey,body}  -> appends a comment
+//   DELETE /program/:id/feed/comments/:commentId          -> deletes the viewer's own comment
 //
 // Admin routes (no auth check — protected only by the URL being unlisted, by design):
 //   GET  /admin/athletes                 POST /admin/athletes {username,password,displayName,programIds}
@@ -25,6 +30,10 @@
 //   GET  /admin/activity-types           POST /admin/activity-types {key,label,infoText}
 //   PUT  /admin/activity-types/:key      {label,infoText}
 //   GET  /admin/feedback                 -> all product feedback, newest first, with the author's name
+//   POST /admin/wrapups/backfill         -> generates any missing week wrap-ups for every program
+//
+// Cron (see triggers.crons in wrangler.jsonc): generates the week wrap-ups every Monday at
+// 18:00 Europe/Madrid.
 
 const ALLOWED_ORIGIN = 'https://daviddamjakob-claude.github.io';
 
@@ -251,6 +260,217 @@ async function handleFeedbackPost(request, env, cors) {
   return json({ ok: true }, 200, cors);
 }
 
+// ---------------- feed ----------------
+// A feed item key identifies a card across both kinds. Workout ids ('wo_...') are only unique
+// within one athlete's state blob, so the owning athlete is part of the key rather than trusted
+// to be globally distinct.
+function workoutItemKey(athleteId, workoutId) { return 'w:' + athleteId + ':' + workoutId; }
+function wrapupItemKey(athleteId, weekId) { return 'r:' + athleteId + ':' + weekId; }
+// Cheap ownership check for writes: rather than rebuilding the whole feed to confirm a card
+// exists, the key is parsed and the athlete it names is checked against the program, which is
+// enough to stop high fives and comments being filed against another program's cards.
+async function feedItemKeyBelongsToProgram(env, programId, itemKey) {
+  const m = /^([wr]):(\d+):(.+)$/.exec(itemKey || '');
+  if (!m) return false;
+  return athleteHasProgram(env, Number(m[2]), programId);
+}
+
+// Workouts are grouped by the week column they were logged under (not by re-deriving from the
+// date they carry), so the Feed's week sections line up exactly with the Training Log's.
+async function programFeedData(env, programId, viewerAthleteId) {
+  const [phasesRes, linked] = await Promise.all([
+    env.DB.prepare('SELECT name, start_date AS startDate, end_date AS endDate FROM phases WHERE program_id = ? ORDER BY sort_order').bind(programId).all(),
+    env.DB.prepare('SELECT a.id, a.display_name AS displayName FROM athletes a JOIN athlete_programs ap ON ap.athlete_id = a.id WHERE ap.program_id = ? ORDER BY a.id').bind(programId).all(),
+  ]);
+  const weeks = deriveWeeksWithIds(phasesRes.results);
+  const weekById = {};
+  weeks.forEach(w => { weekById[w.id] = w; });
+  const nameById = {};
+  linked.results.forEach(a => { nameById[a.id] = a.displayName; });
+
+  const states = await Promise.all(linked.results.map(async a => {
+    const row = await env.DB.prepare('SELECT data FROM program_state WHERE athlete_id = ? AND program_id = ?').bind(a.id, programId).first();
+    let data = null;
+    try { data = row ? JSON.parse(row.data) : null; } catch { data = null; }
+    return { athlete: a, data };
+  }));
+
+  const items = [];
+  states.forEach(({ athlete, data }) => {
+    if (!data || !data.weeks) return;
+    Object.keys(data.weeks).forEach(weekId => {
+      if (!weekById[weekId]) return;
+      ((data.weeks[weekId] || {}).workouts || []).forEach(x => {
+        items.push({
+          key: workoutItemKey(athlete.id, x.id),
+          kind: 'workout',
+          athleteId: athlete.id,
+          displayName: athlete.displayName,
+          weekId,
+          date: (x.values && x.values.date) || null,
+          type: x.type,
+          values: x.values || {},
+          review: x.review || '',
+          details: x.details || '',
+          photos: (x.photos || []).map(p => ({ secure_url: p.secure_url })),
+        });
+      });
+    });
+  });
+
+  const wrapups = await env.DB.prepare(
+    'SELECT athlete_id AS athleteId, week_id AS weekId, data, created_at AS createdAt FROM week_wrapups WHERE program_id = ?'
+  ).bind(programId).all();
+  wrapups.results.forEach(r => {
+    if (!weekById[r.weekId]) return;
+    let summary = null;
+    try { summary = JSON.parse(r.data); } catch { return; }
+    items.push({
+      key: wrapupItemKey(r.athleteId, r.weekId),
+      kind: 'wrapup',
+      athleteId: r.athleteId,
+      displayName: nameById[r.athleteId] || 'Unknown athlete',
+      weekId: r.weekId,
+      createdAt: r.createdAt,
+      summary,
+    });
+  });
+
+  // High fives and comments are read for the whole program in one query each and then attached,
+  // rather than one round trip per card.
+  const [hf, cm] = await Promise.all([
+    env.DB.prepare('SELECT item_key AS itemKey, actor_athlete_id AS actorId FROM feed_high_fives WHERE program_id = ?').bind(programId).all(),
+    env.DB.prepare(
+      'SELECT c.id, c.item_key AS itemKey, c.author_athlete_id AS authorId, a.display_name AS authorName, c.body, c.created_at AS createdAt ' +
+      'FROM feed_comments c JOIN athletes a ON a.id = c.author_athlete_id WHERE c.program_id = ? ORDER BY c.created_at'
+    ).bind(programId).all(),
+  ]);
+  const hfByKey = {}, cmByKey = {};
+  hf.results.forEach(r => { (hfByKey[r.itemKey] ||= []).push(r.actorId); });
+  cm.results.forEach(r => { (cmByKey[r.itemKey] ||= []).push({ id: r.id, authorId: r.authorId, authorName: r.authorName, body: r.body, createdAt: r.createdAt }); });
+  items.forEach(it => {
+    const actors = hfByKey[it.key] || [];
+    it.highFives = { count: actors.length, mine: actors.indexOf(viewerAthleteId) !== -1 };
+    it.comments = cmByKey[it.key] || [];
+  });
+
+  return { viewerAthleteId, weeks, items };
+}
+async function handleFeed(request, env, cors, programId) {
+  const athleteId = await requireAthlete(request, env);
+  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
+  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
+  return json(await programFeedData(env, programId, athleteId), 200, cors);
+}
+async function handleHighFive(request, env, cors, programId) {
+  const athleteId = await requireAthlete(request, env);
+  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
+  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
+  const body = await readJson(request);
+  const itemKey = body && typeof body.itemKey === 'string' ? body.itemKey : '';
+  if (!(await feedItemKeyBelongsToProgram(env, programId, itemKey))) return json({ error: 'Unknown feed item' }, 400, cors);
+  const existing = await env.DB.prepare('SELECT 1 FROM feed_high_fives WHERE program_id = ? AND item_key = ? AND actor_athlete_id = ?')
+    .bind(programId, itemKey, athleteId).first();
+  if (existing) {
+    await env.DB.prepare('DELETE FROM feed_high_fives WHERE program_id = ? AND item_key = ? AND actor_athlete_id = ?')
+      .bind(programId, itemKey, athleteId).run();
+  } else {
+    await env.DB.prepare('INSERT INTO feed_high_fives (program_id, item_key, actor_athlete_id) VALUES (?, ?, ?)')
+      .bind(programId, itemKey, athleteId).run();
+  }
+  const row = await env.DB.prepare('SELECT COUNT(*) AS c FROM feed_high_fives WHERE program_id = ? AND item_key = ?').bind(programId, itemKey).first();
+  return json({ count: row.c, mine: !existing }, 200, cors);
+}
+async function handleCommentPost(request, env, cors, programId) {
+  const athleteId = await requireAthlete(request, env);
+  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
+  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
+  const body = await readJson(request);
+  const itemKey = body && typeof body.itemKey === 'string' ? body.itemKey : '';
+  const text = body && typeof body.body === 'string' ? body.body.trim() : '';
+  if (!(await feedItemKeyBelongsToProgram(env, programId, itemKey))) return json({ error: 'Unknown feed item' }, 400, cors);
+  if (!text) return json({ error: 'body required' }, 400, cors);
+  if (text.length > 1000) return json({ error: 'Comment is too long (1000 characters max)' }, 400, cors);
+  const result = await env.DB.prepare('INSERT INTO feed_comments (program_id, item_key, author_athlete_id, body) VALUES (?, ?, ?, ?)')
+    .bind(programId, itemKey, athleteId, text).run();
+  const row = await env.DB.prepare(
+    'SELECT c.id, c.author_athlete_id AS authorId, a.display_name AS authorName, c.body, c.created_at AS createdAt ' +
+    'FROM feed_comments c JOIN athletes a ON a.id = c.author_athlete_id WHERE c.id = ?'
+  ).bind(result.meta.last_row_id).first();
+  return json(row, 201, cors);
+}
+async function handleCommentDelete(request, env, cors, programId, commentId) {
+  const athleteId = await requireAthlete(request, env);
+  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
+  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
+  // Scoped to the author so one athlete can never delete another's comment.
+  const result = await env.DB.prepare('DELETE FROM feed_comments WHERE id = ? AND program_id = ? AND author_athlete_id = ?')
+    .bind(commentId, programId, athleteId).run();
+  if (!result.meta.changes) return json({ error: 'Not found' }, 404, cors);
+  return json({ ok: true }, 200, cors);
+}
+
+// ---------------- week wrap-ups ----------------
+// YYYY-MM-DD in the program's reference timezone. The wrap-up cron and the week grid both need
+// to agree on what "today" is, and UTC would roll the day over an hour or two early in Barcelona.
+const WRAPUP_TIMEZONE = 'Europe/Madrid';
+function localISODate(d) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: WRAPUP_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+// A week is wrapped up once it has ended, so the Monday cron and the admin backfill are the same
+// operation over a different set of already-finished weeks. Idempotent: the UNIQUE index on
+// (program_id, athlete_id, week_id) means re-running only ever fills gaps.
+//
+// Weeks with nothing planned and nothing done are skipped — that is what an athlete's record
+// looks like for the stretch of the program before they joined it, and a wall of empty 0/0
+// cards is not a wrap-up.
+async function generateWrapupsForProgram(env, programId, todayISO) {
+  const phasesRes = await env.DB.prepare('SELECT name, start_date AS startDate, end_date AS endDate FROM phases WHERE program_id = ? ORDER BY sort_order').bind(programId).all();
+  const finishedWeeks = deriveWeeksWithIds(phasesRes.results).filter(w => w.endISO < todayISO);
+  if (!finishedWeeks.length) return 0;
+  const [linked, existing] = await Promise.all([
+    env.DB.prepare('SELECT a.id FROM athletes a JOIN athlete_programs ap ON ap.athlete_id = a.id WHERE ap.program_id = ?').bind(programId).all(),
+    env.DB.prepare('SELECT athlete_id AS athleteId, week_id AS weekId FROM week_wrapups WHERE program_id = ?').bind(programId).all(),
+  ]);
+  const have = new Set(existing.results.map(r => r.athleteId + '|' + r.weekId));
+  const states = await Promise.all(linked.results.map(async a => {
+    const row = await env.DB.prepare('SELECT data FROM program_state WHERE athlete_id = ? AND program_id = ?').bind(a.id, programId).first();
+    let data = null;
+    try { data = row ? JSON.parse(row.data) : null; } catch { data = null; }
+    return { athleteId: a.id, data };
+  }));
+  const inserts = [];
+  states.forEach(({ athleteId, data }) => {
+    finishedWeeks.forEach(w => {
+      if (have.has(athleteId + '|' + w.id)) return;
+      const s = sumWeeks([w], data);
+      if (!s.sessions && !s.target) return;
+      inserts.push(env.DB.prepare(
+        'INSERT OR IGNORE INTO week_wrapups (program_id, athlete_id, week_id, week_start, week_end, phase_name, data) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).bind(programId, athleteId, w.id, w.startISO, w.endISO, w.phaseName, JSON.stringify({
+        sessions: s.sessions,
+        target: s.target,
+        completionPct: s.completionPct,
+        zone2Minutes: s.zone2Minutes,
+        byDiscipline: s.byDiscipline,
+      })));
+    });
+  });
+  if (!inserts.length) return 0;
+  await env.DB.batch(inserts);
+  return inserts.length;
+}
+async function generateWrapupsForAllPrograms(env, todayISO) {
+  const programs = await env.DB.prepare('SELECT id FROM programs').all();
+  const counts = {};
+  for (const p of programs.results) counts[p.id] = await generateWrapupsForProgram(env, p.id, todayISO);
+  return counts;
+}
+async function adminBackfillWrapups(env, cors) {
+  const counts = await generateWrapupsForAllPrograms(env, localISODate(new Date()));
+  return json({ ok: true, created: counts }, 200, cors);
+}
+
 // ---------------- admin handlers (no auth, by design) ----------------
 // Independent reads/writes go through Promise.all rather than a sequential await loop — every D1
 // statement is its own network round trip, and serialising them was what made the admin buttons
@@ -422,6 +642,11 @@ export default {
       if (seg[0] === 'program' && seg[2] === 'state' && method === 'POST') return handleStatePost(request, env, cors, seg[1]);
       if (seg[0] === 'program' && seg[2] === 'leaderboard' && method === 'GET') return handleLeaderboard(request, env, cors, seg[1]);
 
+      if (seg[0] === 'program' && seg[2] === 'feed' && !seg[3] && method === 'GET') return handleFeed(request, env, cors, seg[1]);
+      if (seg[0] === 'program' && seg[2] === 'feed' && seg[3] === 'high-five' && method === 'POST') return handleHighFive(request, env, cors, seg[1]);
+      if (seg[0] === 'program' && seg[2] === 'feed' && seg[3] === 'comments' && !seg[4] && method === 'POST') return handleCommentPost(request, env, cors, seg[1]);
+      if (seg[0] === 'program' && seg[2] === 'feed' && seg[3] === 'comments' && seg[4] && method === 'DELETE') return handleCommentDelete(request, env, cors, seg[1], seg[4]);
+
       if (seg[0] === 'feedback' && !seg[1] && method === 'POST') return handleFeedbackPost(request, env, cors);
 
       if (seg[0] === 'admin' && seg[1] === 'athletes' && !seg[2] && method === 'GET') return adminListAthletes(env, cors);
@@ -441,6 +666,7 @@ export default {
       if (seg[0] === 'admin' && seg[1] === 'programs' && seg[3] === 'activity-types' && !seg[4] && method === 'PUT') return adminUpdateProgramActivityTypes(request, env, cors, seg[2]);
 
       if (seg[0] === 'admin' && seg[1] === 'feedback' && method === 'GET') return adminListFeedback(env, cors);
+      if (seg[0] === 'admin' && seg[1] === 'wrapups' && seg[2] === 'backfill' && method === 'POST') return adminBackfillWrapups(env, cors);
 
       if (seg[0] === 'admin' && seg[1] === 'activity-types' && !seg[2] && method === 'GET') return adminListActivityTypes(env, cors);
       if (seg[0] === 'admin' && seg[1] === 'activity-types' && !seg[2] && method === 'POST') return adminCreateActivityType(request, env, cors);
@@ -450,5 +676,13 @@ export default {
     } catch (err) {
       return json({ error: String(err && err.message || err) }, 500, cors);
     }
+  },
+
+  // Cron fires at both 16:00 and 17:00 UTC on Mondays so that exactly one of the two is 18:00 in
+  // Europe/Madrid whether or not summer time is in effect; the other hour returns immediately.
+  async scheduled(event, env, ctx) {
+    const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: WRAPUP_TIMEZONE, hour: 'numeric', hour12: false }).format(new Date()));
+    if (hour !== 18) return;
+    ctx.waitUntil(generateWrapupsForAllPrograms(env, localISODate(new Date())));
   },
 };
