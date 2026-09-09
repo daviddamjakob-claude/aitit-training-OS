@@ -9,11 +9,14 @@
 //   POST /program/:id/state              -> stores the request body as the JSON blob
 //   GET  /program/:id/leaderboard        -> computed week/wave/program stats per linked athlete
 //   POST /feedback {feedbackText}        -> files product feedback against the logged-in athlete
-//   GET  /program/:id/feed               -> every linked athlete's workouts + week wrap-ups,
+//   GET  /program/:id/feed               -> every linked athlete's workouts + week reviews,
 //                                          each with its high-five count and comment thread
 //   POST /program/:id/feed/high-five      {itemKey}       -> toggles the viewer's high five
 //   POST /program/:id/feed/comments       {itemKey,body}  -> appends a comment
 //   DELETE /program/:id/feed/comments/:commentId          -> deletes the viewer's own comment
+//   GET  /program/:id/wrapups            -> the viewer's week reviews: [{weekId,createdAt,updatedAt}]
+//   POST /program/:id/wrapups/:weekId    -> creates or refreshes the viewer's review of that week
+//                                          from their stored log; returns {weekId,createdAt,updatedAt,summary}
 //
 // Admin routes (no auth check — protected only by the URL being unlisted, by design):
 //   GET  /admin/athletes                 POST /admin/athletes {username,password,displayName,programIds}
@@ -30,10 +33,9 @@
 //   GET  /admin/activity-types           POST /admin/activity-types {key,label,infoText}
 //   PUT  /admin/activity-types/:key      {label,infoText}
 //   GET  /admin/feedback                 -> all product feedback, newest first, with the author's name
-//   POST /admin/wrapups/backfill         -> generates any missing week wrap-ups for every program
 //
-// Cron (see triggers.crons in wrangler.jsonc): generates the week wrap-ups every Monday at
-// 18:00 Europe/Madrid.
+// Week reviews (the week_wrapups table) are posted by athletes from a button on each week of the
+// Training Log — there is no cron; a week's review exists only once its athlete has posted it.
 
 const ALLOWED_ORIGIN = 'https://daviddamjakob-claude.github.io';
 
@@ -319,7 +321,7 @@ async function programFeedData(env, programId, viewerAthleteId) {
   });
 
   const wrapups = await env.DB.prepare(
-    'SELECT athlete_id AS athleteId, week_id AS weekId, data, created_at AS createdAt FROM week_wrapups WHERE program_id = ?'
+    'SELECT athlete_id AS athleteId, week_id AS weekId, data, created_at AS createdAt, updated_at AS updatedAt FROM week_wrapups WHERE program_id = ?'
   ).bind(programId).all();
   wrapups.results.forEach(r => {
     if (!weekById[r.weekId]) return;
@@ -332,6 +334,7 @@ async function programFeedData(env, programId, viewerAthleteId) {
       displayName: nameById[r.athleteId] || 'Unknown athlete',
       weekId: r.weekId,
       createdAt: r.createdAt,
+      updatedAt: r.updatedAt || r.createdAt,
       summary,
     });
   });
@@ -412,65 +415,62 @@ async function handleCommentDelete(request, env, cors, programId, commentId) {
   return json({ ok: true }, 200, cors);
 }
 
-// ---------------- week wrap-ups ----------------
-// YYYY-MM-DD in the program's reference timezone. The wrap-up cron and the week grid both need
-// to agree on what "today" is, and UTC would roll the day over an hour or two early in Barcelona.
+// ---------------- week reviews (week_wrapups) ----------------
+// YYYY-MM-DD in the program's reference timezone. "Has this week started yet" has to agree with
+// the week grid the athlete is looking at, and UTC would roll the day over an hour or two early
+// in Barcelona.
 const WRAPUP_TIMEZONE = 'Europe/Madrid';
 function localISODate(d) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: WRAPUP_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
 }
-// A week is wrapped up once it has ended, so the Monday cron and the admin backfill are the same
-// operation over a different set of already-finished weeks. Idempotent: the UNIQUE index on
-// (program_id, athlete_id, week_id) means re-running only ever fills gaps.
+async function handleWrapupList(request, env, cors, programId) {
+  const athleteId = await requireAthlete(request, env);
+  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
+  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
+  const rows = await env.DB.prepare(
+    'SELECT week_id AS weekId, created_at AS createdAt, COALESCE(updated_at, created_at) AS updatedAt FROM week_wrapups WHERE program_id = ? AND athlete_id = ?'
+  ).bind(programId, athleteId).all();
+  return json(rows.results, 200, cors);
+}
+// A review is a snapshot of the athlete's stored log for one week, taken when they press the
+// button. Pressing it again on the same week replaces the snapshot with the current numbers —
+// the UNIQUE index on (program_id, athlete_id, week_id) is what turns the INSERT into an update
+// — while high fives and comments stay attached, since the feed item key only names the athlete
+// and the week. Only the athlete's own review can be written this way: the athlete id comes from
+// the session, never from the request.
 //
-// Weeks with nothing planned and nothing done are skipped — that is what an athlete's record
-// looks like for the stretch of the program before they joined it, and a wall of empty 0/0
-// cards is not a wrap-up.
-async function generateWrapupsForProgram(env, programId, todayISO) {
+// Any week that has started can be reviewed, the current one included, so a Sunday-evening
+// review works; a week that has not begun has nothing to review. A week with nothing planned
+// and nothing logged is refused rather than posted as an empty 0/0 card.
+async function handleWrapupPost(request, env, cors, programId, weekId) {
+  const athleteId = await requireAthlete(request, env);
+  if (!athleteId) return json({ error: 'Unauthorized' }, 401, cors);
+  if (!(await athleteHasProgram(env, athleteId, programId))) return json({ error: 'Forbidden' }, 403, cors);
   const phasesRes = await env.DB.prepare('SELECT name, start_date AS startDate, end_date AS endDate FROM phases WHERE program_id = ? ORDER BY sort_order').bind(programId).all();
-  const finishedWeeks = deriveWeeksWithIds(phasesRes.results).filter(w => w.endISO < todayISO);
-  if (!finishedWeeks.length) return 0;
-  const [linked, existing] = await Promise.all([
-    env.DB.prepare('SELECT a.id FROM athletes a JOIN athlete_programs ap ON ap.athlete_id = a.id WHERE ap.program_id = ?').bind(programId).all(),
-    env.DB.prepare('SELECT athlete_id AS athleteId, week_id AS weekId FROM week_wrapups WHERE program_id = ?').bind(programId).all(),
-  ]);
-  const have = new Set(existing.results.map(r => r.athleteId + '|' + r.weekId));
-  const states = await Promise.all(linked.results.map(async a => {
-    const row = await env.DB.prepare('SELECT data FROM program_state WHERE athlete_id = ? AND program_id = ?').bind(a.id, programId).first();
-    let data = null;
-    try { data = row ? JSON.parse(row.data) : null; } catch { data = null; }
-    return { athleteId: a.id, data };
-  }));
-  const inserts = [];
-  states.forEach(({ athleteId, data }) => {
-    finishedWeeks.forEach(w => {
-      if (have.has(athleteId + '|' + w.id)) return;
-      const s = sumWeeks([w], data);
-      if (!s.sessions && !s.target) return;
-      inserts.push(env.DB.prepare(
-        'INSERT OR IGNORE INTO week_wrapups (program_id, athlete_id, week_id, week_start, week_end, phase_name, data) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).bind(programId, athleteId, w.id, w.startISO, w.endISO, w.phaseName, JSON.stringify({
-        sessions: s.sessions,
-        target: s.target,
-        completionPct: s.completionPct,
-        zone2Minutes: s.zone2Minutes,
-        byDiscipline: s.byDiscipline,
-      })));
-    });
-  });
-  if (!inserts.length) return 0;
-  await env.DB.batch(inserts);
-  return inserts.length;
-}
-async function generateWrapupsForAllPrograms(env, todayISO) {
-  const programs = await env.DB.prepare('SELECT id FROM programs').all();
-  const counts = {};
-  for (const p of programs.results) counts[p.id] = await generateWrapupsForProgram(env, p.id, todayISO);
-  return counts;
-}
-async function adminBackfillWrapups(env, cors) {
-  const counts = await generateWrapupsForAllPrograms(env, localISODate(new Date()));
-  return json({ ok: true, created: counts }, 200, cors);
+  const w = deriveWeeksWithIds(phasesRes.results).find(x => x.id === weekId);
+  if (!w) return json({ error: 'Unknown week' }, 404, cors);
+  if (w.startISO > localISODate(new Date())) return json({ error: 'This week has not started yet' }, 400, cors);
+  let data = null;
+  try { data = JSON.parse(await programStateData(env, athleteId, programId)); } catch { data = null; }
+  const s = sumWeeks([w], data);
+  if (!s.sessions && !s.target) return json({ error: 'Nothing logged and no target set for this week' }, 400, cors);
+  const summary = {
+    sessions: s.sessions,
+    target: s.target,
+    completionPct: s.completionPct,
+    zone2Minutes: s.zone2Minutes,
+    byDiscipline: s.byDiscipline,
+  };
+  await env.DB.prepare(
+    'INSERT INTO week_wrapups (program_id, athlete_id, week_id, week_start, week_end, phase_name, data, updated_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, datetime(\'now\')) ' +
+    'ON CONFLICT(program_id, athlete_id, week_id) DO UPDATE SET ' +
+    'week_start = excluded.week_start, week_end = excluded.week_end, phase_name = excluded.phase_name, data = excluded.data, updated_at = excluded.updated_at'
+  ).bind(programId, athleteId, w.id, w.startISO, w.endISO, w.phaseName, JSON.stringify(summary)).run();
+  const row = await env.DB.prepare(
+    'SELECT created_at AS createdAt, updated_at AS updatedAt FROM week_wrapups WHERE program_id = ? AND athlete_id = ? AND week_id = ?'
+  ).bind(programId, athleteId, w.id).first();
+  return json({ weekId: w.id, createdAt: row.createdAt, updatedAt: row.updatedAt, summary }, 200, cors);
 }
 
 // ---------------- admin handlers (no auth, by design) ----------------
@@ -648,6 +648,8 @@ export default {
       if (seg[0] === 'program' && seg[2] === 'feed' && seg[3] === 'high-five' && method === 'POST') return handleHighFive(request, env, cors, seg[1]);
       if (seg[0] === 'program' && seg[2] === 'feed' && seg[3] === 'comments' && !seg[4] && method === 'POST') return handleCommentPost(request, env, cors, seg[1]);
       if (seg[0] === 'program' && seg[2] === 'feed' && seg[3] === 'comments' && seg[4] && method === 'DELETE') return handleCommentDelete(request, env, cors, seg[1], seg[4]);
+      if (seg[0] === 'program' && seg[2] === 'wrapups' && !seg[3] && method === 'GET') return handleWrapupList(request, env, cors, seg[1]);
+      if (seg[0] === 'program' && seg[2] === 'wrapups' && seg[3] && !seg[4] && method === 'POST') return handleWrapupPost(request, env, cors, seg[1], seg[3]);
 
       if (seg[0] === 'feedback' && !seg[1] && method === 'POST') return handleFeedbackPost(request, env, cors);
 
@@ -668,7 +670,6 @@ export default {
       if (seg[0] === 'admin' && seg[1] === 'programs' && seg[3] === 'activity-types' && !seg[4] && method === 'PUT') return adminUpdateProgramActivityTypes(request, env, cors, seg[2]);
 
       if (seg[0] === 'admin' && seg[1] === 'feedback' && method === 'GET') return adminListFeedback(env, cors);
-      if (seg[0] === 'admin' && seg[1] === 'wrapups' && seg[2] === 'backfill' && method === 'POST') return adminBackfillWrapups(env, cors);
 
       if (seg[0] === 'admin' && seg[1] === 'activity-types' && !seg[2] && method === 'GET') return adminListActivityTypes(env, cors);
       if (seg[0] === 'admin' && seg[1] === 'activity-types' && !seg[2] && method === 'POST') return adminCreateActivityType(request, env, cors);
@@ -678,13 +679,5 @@ export default {
     } catch (err) {
       return json({ error: String(err && err.message || err) }, 500, cors);
     }
-  },
-
-  // Cron fires at both 16:00 and 17:00 UTC on Mondays so that exactly one of the two is 18:00 in
-  // Europe/Madrid whether or not summer time is in effect; the other hour returns immediately.
-  async scheduled(event, env, ctx) {
-    const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: WRAPUP_TIMEZONE, hour: 'numeric', hour12: false }).format(new Date()));
-    if (hour !== 18) return;
-    ctx.waitUntil(generateWrapupsForAllPrograms(env, localISODate(new Date())));
   },
 };

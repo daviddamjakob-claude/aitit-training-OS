@@ -176,6 +176,15 @@ body.pre-login .topbar, body.pre-login .panel{display:none}
 .add-btn{width:100%; text-align:center; padding:10px; border-radius:6px; border:0.5px dashed var(--cardborder); background:transparent; color:var(--accent); font-family:"Space Grotesk"; font-weight:500; font-size:12px; letter-spacing:0.06em; cursor:pointer; transition:.2s}
 .add-btn:hover{border-color:var(--accent); background:#fff}
 
+/* week review button — sits at the foot of each Week summary card, posts that week to the Feed */
+.wrapup-btn{width:100%; margin-top:10px; padding:8px 10px; border-radius:5px; border:1px solid var(--accent); background:var(--accent); color:var(--btntext); font-family:"Space Grotesk"; font-weight:600; font-size:11px; letter-spacing:0.08em; text-transform:uppercase; cursor:pointer; transition:.15s}
+.wrapup-btn:hover{background:var(--accentdark); border-color:var(--accentdark)}
+.wrapup-btn.posted{background:transparent; color:var(--accent)}
+.wrapup-btn.posted:hover{background:#fff}
+.wrapup-btn:disabled{opacity:.45; cursor:default; background:transparent; color:var(--muted); border-color:var(--cardborder)}
+.wrapup-status{margin-top:6px; font-size:9.5px; letter-spacing:0.06em; color:var(--muted); text-align:center; min-height:12px}
+.wrapup-status.err{color:#c0392b}
+
 .workouts{display:flex; flex-direction:column; gap:10px}
 .wcard{background:#fff; border:0.5px solid var(--cardborder); border-left:2px solid var(--accent); border-radius:6px; padding:12px 13px; box-shadow:var(--shadow)}
 .wcard-top{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px}
@@ -697,14 +706,28 @@ function save(){
 }
 function flagSaved(txt){ const el=document.getElementById('savedFlag'); el.textContent=txt; el.classList.add('show'); clearTimeout(saveTimer); saveTimer=setTimeout(()=>el.classList.remove('show'),1200); }
 
-let pushTimer;
+// Saves are debounced so a burst of edits becomes one POST. pushInFlight is kept so anything that
+// needs the server to hold the latest state (posting a week review, which is computed server-side
+// from the stored log) can flushRemote() first instead of racing the timer.
+let pushTimer=null, pushInFlight=null;
+function pushNow(){
+  clearTimeout(pushTimer); pushTimer=null;
+  pushInFlight=apiFetch(`/program/${activeProgramId}/state`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)})
+    .then(res=>{ flagSaved(res.ok?'synced':'sync error'); return res.ok; })
+    .catch(()=>{ flagSaved('offline'); return false; })
+    .finally(()=>{ pushInFlight=null; });
+  return pushInFlight;
+}
 function pushRemote(){
   clearTimeout(pushTimer);
-  pushTimer=setTimeout(()=>{
-    apiFetch(`/program/${activeProgramId}/state`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)})
-      .then(res=>{ flagSaved(res.ok?'synced':'sync error'); })
-      .catch(()=> flagSaved('offline'));
-  },800);
+  pushTimer=setTimeout(pushNow,800);
+}
+// Resolves true once the server has the current state: sends a pending debounced save right away,
+// or waits for the one already on the wire, or returns at once when there is nothing to send.
+function flushRemote(){
+  if(pushTimer) return pushNow();
+  if(pushInFlight) return pushInFlight;
+  return Promise.resolve(true);
 }
 async function pullRemote(){
   try{
@@ -736,8 +759,54 @@ function buildBoard(){
     p._weekIds.forEach((wid,i)=> cols.appendChild(buildColumn(WEEKS.find(w=>w.id===wid), pi+i)));
     phase.appendChild(cols); board.appendChild(phase);
   });
-  WEEKS.forEach(w=>{ renderWorkouts(w.id); updateSummary(w.id); });
+  WEEKS.forEach(w=>{ renderWorkouts(w.id); updateSummary(w.id); renderWrapupButton(w.id); });
   buildWeekPicker(); applyMobileFilter(); scrollToCurrentWave();
+}
+
+/* ---------------- WEEK REVIEWS ---------------- */
+// A week review is a snapshot of one week (sessions, target, per-activity breakdown, Zone 2 time)
+// that the athlete posts to the Feed from the button on that week's summary card. It is computed
+// server-side from the stored log, so the button flushes any pending save first. Posting again
+// on the same week refreshes the snapshot; high fives and comments on it stay put.
+let myWrapups = {}; // weekId -> {createdAt, updatedAt} for the viewer on the active program
+async function loadMyWrapups(){
+  try{
+    const res=await apiFetch(`/program/${activeProgramId}/wrapups`);
+    if(!res.ok) throw new Error('wrapups fetch failed');
+    myWrapups={};
+    (await res.json()).forEach(r=>{ myWrapups[r.weekId]={createdAt:r.createdAt, updatedAt:r.updatedAt}; });
+  }catch(e){ myWrapups={}; }
+  WEEKS.forEach(w=> renderWrapupButton(w.id));
+}
+function renderWrapupButton(wid, err){
+  const col=board.querySelector(`.col[data-week="${wid}"]`); if(!col) return;
+  const btn=col.querySelector('[data-wrapup]'), status=col.querySelector('[data-wrapup-status]');
+  if(!btn) return;
+  const w=WEEKS.find(x=>x.id===wid);
+  const posted=myWrapups[wid];
+  const future=w&&weekStatus(w)==='future';
+  btn.disabled=future;
+  btn.classList.toggle('posted',!!posted);
+  btn.textContent=posted?'Update week review':'Post week review';
+  status.classList.toggle('err',!!err);
+  status.textContent=err ? err
+    : future ? 'available once the week starts'
+    : posted ? `in the feed · ${fmtFeedTime(posted.updatedAt||posted.createdAt)}`
+    : 'posts this week’s summary to the feed';
+}
+async function postWeekWrapup(wid, btn){
+  const wasPosted=!!myWrapups[wid];
+  btn.disabled=true; btn.textContent=wasPosted?'Updating…':'Posting…';
+  let err=null;
+  try{
+    if(!(await flushRemote())) throw new Error('Could not sync your log — try again');
+    const res=await apiFetch(`/program/${activeProgramId}/wrapups/${wid}`,{method:'POST'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data.error||'Could not post the review');
+    myWrapups[wid]={createdAt:data.createdAt, updatedAt:data.updatedAt};
+    flagSaved(wasPosted?'review updated':'review posted');
+  }catch(e){ err=e.message||'Could not post the review'; }
+  renderWrapupButton(wid, err);
 }
 function scrollToCurrentWave(){
   if(window.matchMedia('(max-width:700px)').matches) return; // mobile uses the week-picker instead
@@ -808,7 +877,10 @@ function buildColumn(w, idx){
     <div class="bar"><i data-bar></i></div>
     <div class="pct" data-pct>0% of target</div>
     <div class="breakdown" data-breakdown></div>
-    <textarea class="plan-input" style="min-height:56px" data-review placeholder="personal notes…">${escapeHtml(state.weeks[w.id].review)}</textarea>`;
+    <textarea class="plan-input" style="min-height:56px" data-review placeholder="personal notes…">${escapeHtml(state.weeks[w.id].review)}</textarea>
+    <button class="wrapup-btn" data-wrapup type="button"></button>
+    <div class="wrapup-status" data-wrapup-status></div>`;
+  sCard.querySelector('[data-wrapup]').addEventListener('click',e=> postWeekWrapup(w.id,e.currentTarget));
   col.appendChild(sCard);
   col.appendChild(tCard);
 
@@ -1177,7 +1249,7 @@ function renderLeaderboardHtml(athletesStats){
 }
 
 /* ---------------- FEED ---------------- */
-// The shared, program-wide timeline: everyone's logged workouts plus the weekly wrap-ups, laid
+// The shared, program-wide timeline: everyone's logged workouts plus the week reviews, laid
 // out on the same week grid as the Training Log. Unlike the leaderboard this is re-fetched every
 // time the tab is opened — other athletes post while the page is sitting there.
 let feedData = null;
@@ -1196,7 +1268,7 @@ async function loadFeed(){
   renderFeed();
 }
 // Newest first, at both levels: weeks run in reverse, and within a week the workouts run by
-// logged training date descending. Wrap-ups sit above the workouts of the week they summarise.
+// logged training date descending. Week reviews sit above the workouts of the week they summarise.
 function feedByDateDesc(a,b){
   const da=a.date||'', db=b.date||'';
   if(da===db) return 0;
@@ -1261,7 +1333,7 @@ function fmtFeedTime(s){ // SQLite datetime('now') is UTC; render in the viewer'
   return d.toLocaleDateString('en-GB',{day:'numeric',month:'short'})+', '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
 }
 function feedCardHtml(it){
-  const meta=it.kind==='wrapup' ? 'Week wrap-up'
+  const meta=it.kind==='wrapup' ? `Week review · ${fmtFeedTime(it.updatedAt||it.createdAt)}`
     : `${escapeHtml(ACT_MAP[it.type]||it.type)} · ${it.date?fmtDate(it.date):'—'}`;
   const body=it.kind==='wrapup' ? wrapupBodyHtml(it) : feedWorkoutBodyHtml(it);
   return `<article class="feed-card${it.kind==='wrapup'?' wrapup':''}" data-key="${escapeHtml(it.key)}">
@@ -1285,8 +1357,8 @@ function feedWorkoutBodyHtml(it){
   const photos=(it.photos||[]).map((p,i)=>`<div class="wphoto"><img src="${escapeHtml(p.secure_url)}" loading="lazy" data-feed-photo="${i}"></div>`).join('');
   return `${mk?`<div class="wmetrics">${mk}</div>`:''}${rv}${dets}${photos?`<div class="wphotos">${photos}</div>`:''}`;
 }
-// Rendered from the stored snapshot, not recomputed — a wrap-up is what the week looked like when
-// it closed. ACTIVITIES drives the row order so it matches the Training Log's breakdown, and a
+// Rendered from the stored snapshot, not recomputed — a week review is what the week looked like when
+// the athlete posted it. ACTIVITIES drives the row order so it matches the Training Log's breakdown, and a
 // type the athlete never touched still shows as 0/n rather than vanishing.
 function wrapupBodyHtml(it){
   const s=it.summary||{};
@@ -1693,7 +1765,8 @@ async function loadProgram(programId){
   titleInputMobile.value=state.title; targetInputMobile.value=state.target;
   buildBoard();
   renderProgramsMenu(programsList);
-  await pullRemote();
+  myWrapups={};
+  await Promise.all([pullRemote(), loadMyWrapups()]);
 }
 
 async function afterLogin(){
