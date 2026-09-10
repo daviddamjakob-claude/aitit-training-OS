@@ -729,7 +729,8 @@ export default {
     }
   },
 
-  // Cron fires at both 18:00 and 19:00 UTC on Mondays so that exactly one of the two is 20:00 in
+  // Cron fires at both 18:00 and 19:00 UTC on Mondays (day-of-week is spelled MON in wrangler.jsonc:
+  // Cloudflare numbers days from 1 = Sunday, so a bare 1 would be Sunday) so that exactly one is 20:00 in
   // Europe/Madrid whether or not summer time is in effect; the other hour returns immediately.
   async scheduled(event, env, ctx) {
     const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: WRAPUP_TIMEZONE, hour: 'numeric', hour12: false }).format(new Date()));
