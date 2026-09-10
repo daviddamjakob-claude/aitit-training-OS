@@ -441,12 +441,14 @@ function wrapupSummary(w, stateData) {
 // (program_id, athlete_id, week_id) means re-running only ever fills gaps and never overwrites a
 // review an athlete has since refreshed.
 //
-// Weeks with nothing planned and nothing done are skipped — that is what an athlete's record
-// looks like for the stretch of the program before they joined it, and a wall of empty 0/0
-// cards is not a review.
+// Weeks before an athlete's first planned or logged session are skipped — that is what their
+// record looks like for the stretch of the program before they joined it, and a wall of empty
+// 0/0 cards is not a review. From that first week on, every finished week is posted, an empty
+// one included: once someone is on the program, a week with nothing logged is a result too.
 async function generateWrapupsForProgram(env, programId, todayISO) {
   const phasesRes = await env.DB.prepare('SELECT name, start_date AS startDate, end_date AS endDate FROM phases WHERE program_id = ? ORDER BY sort_order').bind(programId).all();
-  const finishedWeeks = deriveWeeksWithIds(phasesRes.results).filter(w => w.endISO < todayISO);
+  const weeks = deriveWeeksWithIds(phasesRes.results);
+  const finishedWeeks = weeks.filter(w => w.endISO < todayISO);
   if (!finishedWeeks.length) return 0;
   const [linked, existing] = await Promise.all([
     env.DB.prepare('SELECT a.id FROM athletes a JOIN athlete_programs ap ON ap.athlete_id = a.id WHERE ap.program_id = ?').bind(programId).all(),
@@ -461,10 +463,14 @@ async function generateWrapupsForProgram(env, programId, todayISO) {
   }));
   const inserts = [];
   states.forEach(({ athleteId, data }) => {
+    // The athlete's first week with anything in it, over the whole program rather than only the
+    // finished weeks, so a plan entered for the current week also marks them as started.
+    const firstActive = weeks.find(w => { const s = sumWeeks([w], data); return s.sessions || s.target; });
+    if (!firstActive) return;
     finishedWeeks.forEach(w => {
+      if (w.startISO < firstActive.startISO) return;
       if (have.has(athleteId + '|' + w.id)) return;
       const summary = wrapupSummary(w, data);
-      if (!summary.sessions && !summary.target) return;
       inserts.push(env.DB.prepare(
         'INSERT OR IGNORE INTO week_wrapups (program_id, athlete_id, week_id, week_start, week_end, phase_name, data, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime(\'now\'))'
       ).bind(programId, athleteId, w.id, w.startISO, w.endISO, w.phaseName, JSON.stringify(summary)));

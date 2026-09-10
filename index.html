@@ -791,7 +791,7 @@ function renderWrapupButton(wid, err){
   status.classList.toggle('err',!!err);
   status.textContent=err ? err
     : posted ? `in the feed · ${fmtFeedTime(posted.updatedAt||posted.createdAt)}`
-    : 'posted automatically on Monday evening';
+    : 'posted automatically on Mondays at 8 pm (Barcelona time)';
 }
 async function postWeekWrapup(wid, btn){
   btn.disabled=true; btn.textContent='Updating…';
