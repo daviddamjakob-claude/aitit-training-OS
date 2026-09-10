@@ -765,9 +765,11 @@ function buildBoard(){
 
 /* ---------------- WEEK REVIEWS ---------------- */
 // A week review is a snapshot of one week (sessions, target, per-activity breakdown, Zone 2 time)
-// that the athlete posts to the Feed from the button on that week's summary card. It is computed
-// server-side from the stored log, so the button flushes any pending save first. Posting again
-// on the same week refreshes the snapshot; high fives and comments on it stay put.
+// that the server posts to the Feed for every athlete on Monday evening once the week has ended.
+// The button on each week's summary card refreshes the athlete's own review with their current
+// numbers (a session logged late, say); it is greyed out until the review exists. The snapshot is
+// computed server-side from the stored log, so the button flushes any pending save first. High
+// fives and comments on the card stay put across an update.
 let myWrapups = {}; // weekId -> {createdAt, updatedAt} for the viewer on the active program
 async function loadMyWrapups(){
   try{
@@ -782,30 +784,26 @@ function renderWrapupButton(wid, err){
   const col=board.querySelector(`.col[data-week="${wid}"]`); if(!col) return;
   const btn=col.querySelector('[data-wrapup]'), status=col.querySelector('[data-wrapup-status]');
   if(!btn) return;
-  const w=WEEKS.find(x=>x.id===wid);
   const posted=myWrapups[wid];
-  const future=w&&weekStatus(w)==='future';
-  btn.disabled=future;
+  btn.disabled=!posted;
   btn.classList.toggle('posted',!!posted);
-  btn.textContent=posted?'Update week review':'Post week review';
+  btn.textContent='Update week review';
   status.classList.toggle('err',!!err);
   status.textContent=err ? err
-    : future ? 'available once the week starts'
     : posted ? `in the feed · ${fmtFeedTime(posted.updatedAt||posted.createdAt)}`
-    : 'posts this week’s summary to the feed';
+    : 'posted automatically on Monday evening';
 }
 async function postWeekWrapup(wid, btn){
-  const wasPosted=!!myWrapups[wid];
-  btn.disabled=true; btn.textContent=wasPosted?'Updating…':'Posting…';
+  btn.disabled=true; btn.textContent='Updating…';
   let err=null;
   try{
     if(!(await flushRemote())) throw new Error('Could not sync your log — try again');
     const res=await apiFetch(`/program/${activeProgramId}/wrapups/${wid}`,{method:'POST'});
     const data=await res.json().catch(()=>({}));
-    if(!res.ok) throw new Error(data.error||'Could not post the review');
+    if(!res.ok) throw new Error(data.error||'Could not update the review');
     myWrapups[wid]={createdAt:data.createdAt, updatedAt:data.updatedAt};
-    flagSaved(wasPosted?'review updated':'review posted');
-  }catch(e){ err=e.message||'Could not post the review'; }
+    flagSaved('review updated');
+  }catch(e){ err=e.message||'Could not update the review'; }
   renderWrapupButton(wid, err);
 }
 function scrollToCurrentWave(){
