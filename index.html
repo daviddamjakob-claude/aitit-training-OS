@@ -263,7 +263,8 @@ body.pre-login .topbar, body.pre-login .panel{display:none}
 
 .rp-controls{display:flex; gap:20px; flex-wrap:wrap; margin:10px 0 16px}
 .rp-controls label{font-size:9.5px; letter-spacing:0.1em; text-transform:uppercase; color:var(--muted); display:flex; flex-direction:column; gap:5px}
-.rp-controls select{font-family:"Space Grotesk"; font-size:12px; color:var(--ink); background:#fff; border:0.5px solid var(--cardborder); border-radius:5px; padding:6px 9px; text-transform:none; letter-spacing:0}
+.rp-controls select,.rp-controls input{font-family:"Space Grotesk"; font-size:12px; color:var(--ink); background:#fff; border:0.5px solid var(--cardborder); border-radius:5px; padding:6px 9px; text-transform:none; letter-spacing:0}
+.rp-controls input[type=number]{width:70px}
 .rp-legend{display:flex; gap:16px; margin-bottom:8px; font-size:10.5px; color:var(--muted)}
 .rp-legend-item{display:flex; align-items:center; gap:6px}
 .rp-chart-scroll{position:relative; padding-bottom:2px}
@@ -1143,6 +1144,8 @@ function renderAnalytics(){
       <div class="rp-controls">
         <label>Axis 1 (bar height)<select id="rpAxis1"></select></label>
         <label>Axis 2 (line)<select id="rpAxis2"></select></label>
+        <label>Min km<input type="number" id="rpKmMin" min="0" step="0.1" placeholder="Any"></label>
+        <label>Max km<input type="number" id="rpKmMax" min="0" step="0.1" placeholder="Any"></label>
       </div>
       <div id="runProgressChart"></div>
     </div>` : ''}`;
@@ -1461,6 +1464,7 @@ const RUN_PROGRESS_METRICS = {
   maxHr:     {label:'Max HR',      field:'maxHr',     parse:v=>parseFloat(v), unit:'bpm'},
 };
 let runProgressAxis1='km', runProgressAxis2='avgHr';
+let runProgressKmMin=null, runProgressKmMax=null;
 function parseHM(v){ // "1:55" -> 115 (H:MM), "0:46:54" -> 46.9 (H:MM:SS)
   if(v==null||v==='') return NaN;
   const parts=String(v).split(':').map(Number);
@@ -1483,6 +1487,11 @@ function wireRunProgressControls(){
   a1.value=runProgressAxis1; a2.value=runProgressAxis2;
   a1.addEventListener('change',()=>{ runProgressAxis1=a1.value; renderRunProgressChart(); });
   a2.addEventListener('change',()=>{ runProgressAxis2=a2.value; renderRunProgressChart(); });
+  const kmMin=document.getElementById('rpKmMin'), kmMax=document.getElementById('rpKmMax');
+  kmMin.value=runProgressKmMin==null?'':runProgressKmMin;
+  kmMax.value=runProgressKmMax==null?'':runProgressKmMax;
+  kmMin.addEventListener('input',()=>{ runProgressKmMin=kmMin.value===''?null:parseFloat(kmMin.value); renderRunProgressChart(); });
+  kmMax.addEventListener('input',()=>{ runProgressKmMax=kmMax.value===''?null:parseFloat(kmMax.value); renderRunProgressChart(); });
 }
 function getRunProgressActivities(){
   const activities=[];
@@ -1490,7 +1499,13 @@ function getRunProgressActivities(){
     (state.weeks[w.id].workouts||[]).forEach(x=>{ if(x.type==='zone2' && x.values.includeInRunProgress!==false) activities.push(x); });
   });
   activities.sort((a,b)=>{ const da=a.values.date||'', db=b.values.date||''; return da<db?-1:da>db?1:0; });
-  return activities;
+  return activities.filter(a=>{
+    const km=parseFloat(a.values.km);
+    if(isNaN(km)) return true;
+    if(runProgressKmMin!=null && km<runProgressKmMin) return false;
+    if(runProgressKmMax!=null && km>runProgressKmMax) return false;
+    return true;
+  });
 }
 // Each metric has its own conventional axis domain rather than a generic data-driven range:
 // duration/km run 0 up to the dataset's own max (with a little headroom); pace metrics are
@@ -1531,7 +1546,11 @@ function renderRunProgressChart(){
   const container=document.getElementById('runProgressChart');
   if(!container) return;
   const activities=getRunProgressActivities();
-  if(!activities.length){ container.innerHTML='<div class="lb-empty">No Zone 2 activities logged yet.</div>'; return; }
+  if(!activities.length){
+    const filtered=runProgressKmMin!=null||runProgressKmMax!=null;
+    container.innerHTML=`<div class="lb-empty">${filtered?'No Zone 2 activities in that km range.':'No Zone 2 activities logged yet.'}</div>`;
+    return;
+  }
   const m1=RUN_PROGRESS_METRICS[runProgressAxis1], m2=RUN_PROGRESS_METRICS[runProgressAxis2];
   const v1=activities.map(a=>m1.parse(a.values[m1.field]));
   const v2=activities.map(a=>m2.parse(a.values[m2.field]));
